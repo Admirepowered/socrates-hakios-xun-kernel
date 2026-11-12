@@ -55,7 +55,7 @@
 #define GICD_IGRPMODR(n)        (0x0d00 + 4 * (n))
 #define GICD_IROUTER(n)         (0x6000 + 8 * (n))
 
-#define GICR_FRAME_SIZE         0x20000     /* RD_base + SGI_base per CPU */
+#define GICR_FRAME_SIZE         0x20000     /* RD_base + SGI_base per CPU, the older SoCs; the device tree says when it is not */
 #define GICR_TYPER              0x0008
 #define GICR_TYPER_LAST         (1u << 4)
 #define GICR_WAKER              0x0014
@@ -80,6 +80,7 @@
 
 static vm_offset_t gicd_base, gicr_base;
 static vm_size_t   gicr_size;
+static vm_size_t   gicr_frame = GICR_FRAME_SIZE;   /* "redistributor-stride" in the device tree: 0x40000 on SM8550 */
 static vm_offset_t gicr_cpu_base[MAX_CPUS]; /* each processor's redistributor frame */
 
 /*
@@ -399,7 +400,7 @@ gic_find_redistributor(void)
 	/* GICR_TYPER[63:32] packs Aff3.Aff2.Aff1.Aff0 */
 	uint32_t affinity = (uint32_t)(((mpidr >> 32) & 0xff) << 24 | (mpidr & 0xffffff));
 
-	for (vm_offset_t frame = gicr_base; frame + GICR_FRAME_SIZE <= gicr_base + gicr_size; frame += GICR_FRAME_SIZE) {
+	for (vm_offset_t frame = gicr_base; frame + gicr_frame <= gicr_base + gicr_size; frame += gicr_frame) {
 		uint64_t typer = *(volatile uint64_t *)(frame + GICR_TYPER);
 
 		if ((uint32_t)(typer >> 32) == affinity) {
@@ -420,6 +421,9 @@ gic_v3_irq_cpu_init(void)
 	vm_offset_t gicr;
 	uint32_t mine = 1u << GIC_INTID_VTIMER;
 
+	kprintf("gic: enter, cpu_number=%d mpidr=%llx gicd=%lx gicr_base=%lx frame=%lx\n", cpu,
+	    __builtin_arm_rsr64("MPIDR_EL1"), (uint64_t)gicd_base, (uint64_t)gicr_base, (uint64_t)gicr_frame);
+
 	if (gicd_base == 0) {
 		DTEntry entry;
 		void const *prop;
@@ -437,6 +441,16 @@ gic_v3_irq_cpu_init(void)
 		gicd_base = ml_io_map(soc_base + reg[0], reg[1]);
 		gicr_base = ml_io_map(soc_base + reg[2], reg[3]);
 		gicr_size = reg[3];
+		/* a SoC whose eight redistributors are 0x40000 apart says so; the older ones say nothing and are 0x20000 */
+		{
+			void const *stride_prop;
+			unsigned int stride_size;
+
+			if (SecureDTGetProperty(entry, "redistributor-stride", &stride_prop, &stride_size) == kSuccess &&
+			    stride_size >= sizeof(uint32_t) && *(uint32_t const *)stride_prop != 0) {
+				gicr_frame = *(uint32_t const *)stride_prop;
+			}
+		}
 		if (gicd_base == 0 || gicr_base == 0) {
 			panic("gic: cannot map the distributor/redistributor");
 		}
@@ -449,6 +463,7 @@ gic_v3_irq_cpu_init(void)
 	__builtin_arm_isb(ISB_SY);
 
 	gicr = gicr_cpu_base[cpu] = gic_find_redistributor();
+	kprintf("gic: cpu %d: its redistributor is %lx\n", cpu, (uint64_t)gicr);
 
 	uint32_t waker = gic_read32(gicr + GICR_WAKER);
 	if (waker & (GICR_WAKER_PROCSLEEP | GICR_WAKER_CHILDASLEEP)) {

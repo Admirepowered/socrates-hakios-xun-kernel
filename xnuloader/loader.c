@@ -34,7 +34,16 @@ struct payload_entry { char name[16]; uint32_t size; uint32_t reserved; };
 #define RESIDENT_RD_RESERVE 0x30000000ULL         /* RAM that must remain for the kernel itself */
 #define PAGE_SIZE_MAX       0x4000ULL
 
+/*
+ * Where this port keeps the system image on the phone itself, so that a run does not need the 2.4 GB upload: the
+ * partition "cust" (2 GiB on the Redmi K60 Pro, a vendor configuration partition that nothing under HakiOS reads) holds
+ * the APFS container as it is, written once with tools/... (devices/socrates/README.md). A container bigger than the
+ * partition cannot be kept there: the reader says so and a run goes on with what the host sent.
+ */
+#define RESIDENT_PARTITION  u"cust"
 #define LOG_PARTITION       u"logdump"
+/* Xiaomi names it logfs on socrates (SM8550); the log is written to whichever the phone has */
+#define LOG_PARTITION_ALT   u"logfs"
 #define CHECKPOINT_SELFTEST 999
 #define PANIC_LOG_SIZE      0x80000u
 #define NVRAM_BANK_SIZE     0x2000u
@@ -261,12 +270,12 @@ clean_dcache(uint64_t start, uint64_t end)
 /* ------------------------------------------------------------------------ */
 /* Log persistence: raw write to a GPT partition (phone only)               */
 
+/* The block device of the partition called NAME, or NULL. */
 static efi_block_io *
-find_log_partition(void)
+find_partition_named(const char16 *want)
 {
 	static const efi_guid part_guid = EFI_PARTITION_INFO_GUID;
 	static const efi_guid blk_guid = EFI_BLOCK_IO_GUID;
-	static const char16 want[] = LOG_PARTITION;
 	efi_handle *handles;
 	uint64_t count;
 
@@ -281,19 +290,95 @@ find_log_partition(void)
 		if (EFI_ERROR(BS->handle_protocol(handles[i], &part_guid, (void **)&info)) || info->type != 2) {
 			continue;
 		}
-		for (unsigned k = 0; k < sizeof(want) / sizeof(want[0]); k++) {
+		for (unsigned k = 0; k < 9; k++) {
 			if (info->name[k] != want[k]) {
 				match = 0;
 				break;
 			}
+			if (want[k] == 0) {
+				break;
+			}
 		}
 		if (match && !EFI_ERROR(BS->handle_protocol(handles[i], &blk_guid, (void **)&bio))) {
-			/* (the handle array is pool memory the caller owns; this runs on every log write) */
 			BS->free_pool(handles);
 			return bio;
 		}
 	}
 	BS->free_pool(handles);
+	return NULL;
+}
+
+/*
+ * A resident image kept on the phone's own storage, so that a run does not need the 2.4 GB upload every time: the
+ * partition (boot-arg-like env resident_part=<name>, "cust" when unset) holds the APFS container exactly as the image
+ * file has it, and the container's own superblock says how big it is (nx_block_size at 0x20, nx_block_count at 0x28).
+ * Returns the size it put at DEST, 0 if it did not.
+ */
+#define RESIDENT_CHUNK (1u << 20)
+
+static uint64_t
+resident_from_storage(const char16 *part, uint64_t dest, uint64_t room)
+{
+	efi_block_io *bio = find_partition_named(part);
+	static uint8_t hdr[4096];      /* static: a 4 KiB frame makes clang call __chkstk, which a freestanding image has not */
+	uint32_t bs, block_size;
+	uint64_t blocks, size, done;
+
+	if (bio == NULL) {
+		print("resident: the phone has no partition of that name\n");
+		return 0;
+	}
+	bs = bio->media->block_size;
+	if (bs < 512 || bs > sizeof(hdr)) {
+		print("resident: a block size of %u is not one this reads\n", bs);
+		return 0;
+	}
+	if (EFI_ERROR(bio->read_blocks(bio, bio->media->media_id, 0, 1, hdr))) {
+		print("resident: the partition cannot be read\n");
+		return 0;
+	}
+	if (memcmp(hdr, "NXSB", 4) != 0) {
+		print("resident: no APFS container in that partition (%02x %02x %02x %02x)\n", hdr[0], hdr[1], hdr[2], hdr[3]);
+		return 0;
+	}
+	memcpy(&block_size, hdr + 0x20, 4);
+	memcpy(&blocks, hdr + 0x28, 8);
+	if (block_size == 0 || block_size > bs || blocks == 0) {
+		print("resident: the container says block size %u and %lu blocks\n", block_size, blocks);
+		return 0;
+	}
+	size = (uint64_t)block_size * blocks;
+	if (size > room) {
+		print("resident: the container is %lx bytes, more than the %lx of room\n", size, room);
+		return 0;
+	}
+	for (done = 0; done < size; ) {
+		uint64_t chunk = size - done > RESIDENT_CHUNK ? RESIDENT_CHUNK : size - done;
+		uint64_t first = done / bs;
+
+		if (EFI_ERROR(bio->read_blocks(bio, bio->media->media_id, first, (chunk + bs - 1) / bs, (void *)(uintptr_t)(dest + done)))) {
+			print("resident: the read stopped at %lx of %lx\n", done, size);
+			return 0;
+		}
+		done += chunk;
+	}
+	clean_dcache(dest, dest + size);
+	print("resident image read from the partition: %lx bytes\n", size);
+	return size;
+}
+
+static efi_block_io *
+find_log_partition(void)
+{
+	static const char16 *const wants[] = { LOG_PARTITION, LOG_PARTITION_ALT };
+
+	for (unsigned w = 0; w < sizeof(wants) / sizeof(wants[0]); w++) {
+		efi_block_io *bio = find_partition_named(wants[w]);
+
+		if (bio != NULL) {
+			return bio;
+		}
+	}
 	return NULL;
 }
 
@@ -561,6 +646,12 @@ struct platform {
 	int core_shift;                  /* ... in this bit of MPIDR: the phone numbers them in the second affinity field */
 	uint32_t timeout_scale;          /* a kernel on several cores gets this much longer to wait for a lock, 0: as it is */
 	uint32_t small_cores;            /* a bit for each of the slower cores, by number: "small-core" in the device tree */
+	/*
+	 * How much of the redistributors' window the device tree gives the kernel, in bytes. 0 is 0x100000, which covers
+	 * four of them at the 0x40000 stride of the older SoCs; a SoC whose eight cores each have one at that stride needs
+	 * 0x200000, or a kernel started on core 4 and up touches memory the mapping does not have and stops there.
+	 */
+	uint32_t gic_redist_size;
 };
 
 static const struct platform platform_qemu_virt = {
@@ -586,6 +677,20 @@ static const struct platform platform_redwood = {
 	 * (XNU's machine_routines.c, ml_choose_slow_core_partners()).
 	 */
 	.small_cores = 0x0f,
+};
+
+/*
+ * The Redmi K60 Pro (socrates, SM8550 "kalama"): the same GICv3 and the same 8 cores numbered in the second affinity
+ * field, but the controller is at 0x17100000 (GICD) and 0x17180000 (GICR), the peripherals run from 0x100000, and the
+ * slow cores are the other way round: 0-2 are the three Cortex-A510s, 3-6 the A715/A710s, 7 the Cortex-X3.
+ */
+static const struct platform platform_socrates = {
+	.name = "socrates", .io_base = 0x00100000, .io_size = 0x1FF00000,
+	.gic_dist = 0x17100000, .gic_redist = 0x17180000, .uart = 0, .log_other_cpu = 1,
+	.cores = 8, .core_shift = 8,
+	.small_cores = 0x07,
+	/* eight redistributors at SM8550's 0x40000 stride (sm8550.dtsi, redistributor-stride) */
+	.gic_redist_size = 0x200000,
 };
 
 /* ------------------------------------------------------------------------ */
@@ -974,6 +1079,9 @@ static uint64_t sound_len;
 #define NOTE_SECONDS            24      /* how long the kernel's progress is written down as it happens */
 
 static void wdt_pet(void);
+/* the kernel log of the run that returned last: "oem log" after a run says what the kernel said */
+static const char *last_klog;
+static uint64_t last_klog_len;
 static int wdt_armed;
 
 /*
@@ -2941,6 +3049,13 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 		resident_rd_size = pi.resident_size;
 		print("resident image from the payload: %x bytes\n", (uint64_t)pi.resident_size);
 	}
+	/*
+	 * Nothing sent and nothing in the payload: the image may be kept on the phone itself (see resident_from_storage).
+	 */
+	if (resident_rd_size == 0 && win_size > RESIDENT_RD_OFFSET + RESIDENT_RD_RESERVE) {
+		resident_rd_size = resident_from_storage(RESIDENT_PARTITION, phys_base + RESIDENT_RD_OFFSET,
+		    win_size - RESIDENT_RD_OFFSET - RESIDENT_RD_RESERVE);
+	}
 	if (resident_rd_size != 0) {
 		uint64_t res_pa = phys_base + RESIDENT_RD_OFFSET;
 		uint64_t res_size = (resident_rd_size + PAGE_SIZE_MAX - 1) & ~(PAGE_SIZE_MAX - 1);
@@ -2959,7 +3074,15 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 		}
 	}
 	/* everything up to topOfKernelData is the kernel's static region: it must cover both images */
-	uint64_t dt_pa = rd1_size != 0 ? rd1_pa + rd1_size : rd_pa + rd_size;
+	/*
+	 * The device tree goes right after the kernel and its ramdisk: a resident image is gigabytes above them, and a
+	 * tree placed after it lands where this phone's kernel does not reach (0x95b9fc000 with a 2.4 GB image: the
+	 * kernel dies before it prints a word). Only when there is no room before the resident image does it go after.
+	 */
+	uint64_t dt_pa = rd_pa + rd_size;
+	if (rd1_size != 0 && dt_pa + 0x20000ULL + PAGE_SIZE_MAX > rd1_pa) {
+		dt_pa = rd1_pa + rd1_size;
+	}
 	uint64_t dt_max = 0x10000;
 	uint64_t ba_pa = dt_pa + dt_max;
 	uint64_t top = ba_pa + PAGE_SIZE_MAX;
@@ -3428,8 +3551,16 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	dt_begin(&w, "gic");
 	dt_prop_str(&w, "device_type", "interrupt-controller");
 	dt_prop_str(&w, "compatible", "arm,gic-v3");
-	uint64_t gic_reg[4] = { plat->gic_dist - plat->io_base, 0x10000, plat->gic_redist - plat->io_base, 0x100000 };
+	uint64_t gic_redist_size = plat->gic_redist_size != 0 ? plat->gic_redist_size : 0x100000;
+	uint64_t gic_reg[4] = { plat->gic_dist - plat->io_base, 0x10000, plat->gic_redist - plat->io_base,
+				gic_redist_size };
 	dt_prop(&w, "reg", gic_reg, sizeof(gic_reg));
+	/*
+	 * The distance between two processors' redistributor frames: 0x20000 on the older SoCs, 0x40000 on SM8550. The
+	 * kernel walks the window looking for the frame whose GICR_TYPER names the processor it runs on, so a stride it
+	 * has wrong finds nothing on a core above the first, and that core stops with no word said (gic_v3_irq.c).
+	 */
+	dt_prop_u32(&w, "redistributor-stride", (uint32_t)(gic_redist_size / (plat->cores > 0 ? plat->cores : 1)));
 	dt_end(&w);
 	if (plat->uart != 0) {
 		dt_begin(&w, "uart0");
@@ -3573,6 +3704,8 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	}
 	const char *klog = (const char *)loader_ctx[CTX_LOG_PA];
 	uint64_t klog_len = loader_ctx[CTX_LOG_LEN];
+	last_klog = klog;
+	last_klog_len = klog_len;
 	uint64_t reason = loader_ctx[CTX_REASON];
 	if (checkpoint == CHECKPOINT_SELFTEST) {
 		print("return-path self test passed\n");
@@ -3991,6 +4124,8 @@ fb_command(char *cmd)
 		} else if (starts_with(cmd, "oem log")) {
 			if (busy && running_live != NULL) {
 				compose_live_log(running_live, running_slide);
+			} else if (last_klog != NULL && last_klog_len != 0) {
+				compose_logs(last_klog, last_klog_len);
 			} else {
 				compose_logs(NULL, 0);
 			}
@@ -4345,6 +4480,8 @@ efi_main(efi_handle image, efi_system_table *st)
 		SCREEN.stride = GOP->mode->info->pixels_per_scanline * 4;
 		if (SCREEN.base == 0xE1000000ULL) {
 			PLAT = &platform_redwood;
+		} else if (SCREEN.base == 0xB8000000ULL) {
+			PLAT = &platform_socrates;
 		} else {
 			ramfb_phone_screen();
 		}
@@ -4356,9 +4493,17 @@ efi_main(efi_handle image, efi_system_table *st)
 	wdt_arm();
 
 	int have_payload = parse_payload(&pi, 0);
-	if (have_payload && pi.usb_mode && usb_start()) {
-		flush_log();
-		usb_command_loop();
+	if (have_payload && pi.usb_mode) {
+		if (usb_start()) {
+			flush_log();
+			usb_command_loop();
+		}
+		/*
+		 * A port with no working USB has no console but the screen: keep the log there, long enough to be read,
+		 * instead of resetting into Android at once.
+		 */
+		print("\nusb: no host; the log stays on the screen for 120 s\n");
+		BS->stall(120 * 1000000);
 	}
 
 	/* One-shot mode: run the kernel that came with the image, then reset. */
