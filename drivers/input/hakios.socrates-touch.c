@@ -1609,11 +1609,15 @@ goodix_thread(__unused void *parameter, __unused wait_result_t result)
 	cmd_db = ml_io_map_wcomb(CMD_DB_PHYS, CMD_DB_SIZE);      /* memory, not registers: no alignment rules */
 	printf("goodix: cmd_db at %#x\n", (uint64_t)cmd_db);
 	if (stage < 3) {
-		/* stage 2 also reads one pin: the mappings are known to work here, so if this returns the pin controller
-		 * answers and the hang of stage 3 is in what the driver then writes */
-		printf("goodix: probe: gpio0's cfg is %#x\n", rd(GPIO_CFG(0)));
+		/*
+		 * Two reads through the same kind of mapping: the command database is plain memory (a read of it cannot stop
+		 * anything), the pin controller is a block of registers. Which of them answers says whether it is the mapping
+		 * this kernel hands back or the block itself that the phone stops on.
+		 */
+		printf("goodix: probe: cmd_db[0] is %#x (memory, through ml_io_map_wcomb)\n", *(volatile uint32_t *)cmd_db);
+		printf("goodix: probe: (the memory answered; now the pin controller)\n");
 		printf("goodix: probe: gpio44's cfg is %#x\n", rd(GPIO_CFG(PIN_MISO)));
-		printf("goodix: the pin controller answered\n");
+		printf("goodix: probe: (the pin controller answered)\n");
 		thread_terminate(current_thread());
 		return;
 	}
