@@ -61,6 +61,10 @@ extern kern_return_t thread_terminate(thread_t thread);
 extern lck_mtx_t hakios_rsc_lock;
 
 static vm_offset_t tlmm, gcc, se, rsc, cmd_db;
+/* boot-arg touch_stride=<hex>: the distance between two pins' registers. The reference phone's tree and U-Boot both
+ * say 0x1000, which on this phone walks off the block the controller answers in (a read there stops the phone);
+ * 214 pins fit in the 32 KiB it does answer, at 0x80 each, which is what this port starts from. */
+static vm_offset_t gpio_stride = 0x80;
 
 static uint32_t touch_stage = 9;   /* boot-arg touch_stage=: how far the bring-up goes */
 static uint32_t no_gpio;   /* boot-arg touch_no_gpio=1: touch no pin at all (the one experiment that says whether a
@@ -95,8 +99,8 @@ sleep_ms(uint32_t ms)
 
 #define TLMM_PHYS               0x0f000000UL
 #define TLMM_SIZE               0x100000UL
-#define GPIO_CFG(n)             (tlmm + 0x1000UL * (n))         /* [1:0] pull, [5:2] function, [8:6] drive, [9] output */
-#define GPIO_IO(n)              (tlmm + 0x1000UL * (n) + 4)     /* bit 0 in, bit 1 out */
+#define GPIO_CFG(n)             (tlmm + gpio_stride * (n))      /* [1:0] pull, [5:2] function, [8:6] drive, [9] output */
+#define GPIO_IO(n)              (tlmm + gpio_stride * (n) + 4)  /* bit 0 in, bit 1 out */
 #define PULL_NONE               0
 #define PULL_UP                 3
 
@@ -1591,6 +1595,14 @@ goodix_thread(__unused void *parameter, __unused wait_result_t result)
 	PE_parse_boot_argn("touch_stage", &stage, sizeof(stage));
 	PE_parse_boot_argn("touch_no_rpmh", &no_rpmh, sizeof(no_rpmh));
 	PE_parse_boot_argn("touch_no_gpio", &no_gpio, sizeof(no_gpio));
+	{
+		uint32_t stride = 0x80;
+
+		if (PE_parse_boot_argn("touch_stride", &stride, sizeof(stride)) && stride >= 0x10 && stride <= 0x1000) {
+			gpio_stride = stride;
+		}
+		printf("goodix: the pins are %#lx bytes apart\n", (unsigned long)gpio_stride);
+	}
 	touch_stage = stage;
 	printf("goodix: stage %u\n", stage);
 	if (stage < 2) {
@@ -1610,20 +1622,29 @@ goodix_thread(__unused void *parameter, __unused wait_result_t result)
 	printf("goodix: cmd_db at %#x\n", (uint64_t)cmd_db);
 	if (stage < 3) {
 		/*
-		 * A control and a question, in one run: the interrupt controller's redistributor is a block of registers this
-		 * kernel maps and reads at boot (the GIC works: interrupts and the timer run), so reading it here says whether
-		 * a device register can be read from a thread at all; the pin controller is the one that stops the phone.
+		 * Which register of the pin controller answers: boot-arg touch_probe_off=<hex> names one offset to read, so that
+		 * one build finds the range the phone's controller answers in (a read outside it stops the phone outright, so
+		 * each run can only try one). The interrupt controller is read first as the control: a device register this
+		 * kernel maps and reads at boot.
 		 */
-		printf("goodix: probe: ml_io_map gives tlmm=%llx gcc=%llx se=%llx rsc=%llx cmd_db=%llx\n",
-		    (uint64_t)tlmm, (uint64_t)gcc, (uint64_t)se, (uint64_t)rsc, (uint64_t)cmd_db);
+		uint32_t probe = 0x2C000;
+		PE_parse_boot_argn("touch_probe_off", &probe, sizeof(probe));
 		vm_offset_t gicr = ml_io_map(0x17180000, 0x10000);
-		printf("goodix: probe: the redistributor maps at %llx; its GICR_TYPER is %llx\n", (uint64_t)gicr,
+		printf("goodix: probe: the redistributor at %llx says GICR_TYPER %llx\n", (uint64_t)gicr,
 		    (uint64_t)(*(volatile uint64_t *)(gicr + 8)));
-		printf("goodix: probe: (the interrupt controller answered; now the pin controller at its first register)\n");
-		volatile uint32_t *t = (volatile uint32_t *)tlmm;
-		printf("goodix: probe: tlmm[0] is %llx\n", (uint64_t)t[0]);
-		printf("goodix: probe: gpio1's cfg (offset 0x1000) is %llx\n", (uint64_t)t[0x1000 / 4]);
-		printf("goodix: probe: (the pin controller answered at 0x1000)\n");
+		printf("goodix: probe: reading the pin controller at offset %#x\n", (uint64_t)probe);
+		/* touch_probe_page=1: map only that page, rather than the 1 MB window the driver maps */
+		uint32_t page = 0;
+		PE_parse_boot_argn("touch_probe_page", &page, sizeof(page));
+		uint32_t value;
+		if (page) {
+			vm_offset_t one = ml_io_map(0x0f000000UL + (probe & ~0xfffUL), 0x1000);
+			printf("goodix: probe: the page maps at %llx; reading its first word\n", (uint64_t)one);
+			value = *(volatile uint32_t *)one;
+		} else {
+			value = *(volatile uint32_t *)((uintptr_t)tlmm + probe);
+		}
+		printf("goodix: probe: offset %#x is %#x (it answered)\n", (uint64_t)probe, (uint64_t)value);
 		thread_terminate(current_thread());
 		return;
 	}
