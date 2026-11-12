@@ -1507,10 +1507,22 @@ bring_up(void)
 
 	/* by hand; which of the two data pins is the input is not written down anywhere, so try both */
 	spi_transfer = bitbang_transfer;
+	if (touch_stage < 5) {
+		printf("goodix: stage %u stops before the pins are driven\n", touch_stage);
+		return false;
+	}
 	for (int attempt = 0; attempt < 2; attempt++) {
 		bitbang_in = attempt == 0 ? PIN_MISO : PIN_MOSI;
 		bitbang_out = attempt == 0 ? PIN_MOSI : PIN_MISO;
 		bitbang_init();
+		printf("goodix: the pins are driven by hand (in gpio%u, out gpio%u); resetting the chip\n", bitbang_in,
+		    bitbang_out);
+		touch_reset();
+		printf("goodix: the chip has been reset; reading its firmware version\n");
+		if (touch_stage < 6) {
+			printf("goodix: stage %u stops after the reset\n", touch_stage);
+			return false;
+		}
 		if (chip_probe(true)) {
 			printf("goodix: %s answers on pins driven by hand (data in on gpio%u)\n", chip_name(), bitbang_in);
 			return true;
