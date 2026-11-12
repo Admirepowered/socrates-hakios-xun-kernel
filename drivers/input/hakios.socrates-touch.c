@@ -1610,14 +1610,20 @@ goodix_thread(__unused void *parameter, __unused wait_result_t result)
 	printf("goodix: cmd_db at %#x\n", (uint64_t)cmd_db);
 	if (stage < 3) {
 		/*
-		 * Two reads through the same kind of mapping: the command database is plain memory (a read of it cannot stop
-		 * anything), the pin controller is a block of registers. Which of them answers says whether it is the mapping
-		 * this kernel hands back or the block itself that the phone stops on.
+		 * A control and a question, in one run: the interrupt controller's redistributor is a block of registers this
+		 * kernel maps and reads at boot (the GIC works: interrupts and the timer run), so reading it here says whether
+		 * a device register can be read from a thread at all; the pin controller is the one that stops the phone.
 		 */
-		printf("goodix: probe: cmd_db[0] is %#x (memory, through ml_io_map_wcomb)\n", *(volatile uint32_t *)cmd_db);
-		printf("goodix: probe: (the memory answered; now the pin controller)\n");
-		printf("goodix: probe: gpio44's cfg is %#x\n", rd(GPIO_CFG(PIN_MISO)));
-		printf("goodix: probe: (the pin controller answered)\n");
+		printf("goodix: probe: ml_io_map gives tlmm=%llx gcc=%llx se=%llx rsc=%llx cmd_db=%llx\n",
+		    (uint64_t)tlmm, (uint64_t)gcc, (uint64_t)se, (uint64_t)rsc, (uint64_t)cmd_db);
+		vm_offset_t gicr = ml_io_map(0x17180000, 0x10000);
+		printf("goodix: probe: the redistributor maps at %llx; its GICR_TYPER is %llx\n", (uint64_t)gicr,
+		    (uint64_t)(*(volatile uint64_t *)(gicr + 8)));
+		printf("goodix: probe: (the interrupt controller answered; now the pin controller at its first register)\n");
+		volatile uint32_t *t = (volatile uint32_t *)tlmm;
+		printf("goodix: probe: tlmm[0] is %llx\n", (uint64_t)t[0]);
+		printf("goodix: probe: gpio1's cfg (offset 0x1000) is %llx\n", (uint64_t)t[0x1000 / 4]);
+		printf("goodix: probe: (the pin controller answered at 0x1000)\n");
 		thread_terminate(current_thread());
 		return;
 	}
