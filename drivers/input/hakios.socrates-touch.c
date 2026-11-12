@@ -1638,6 +1638,14 @@ goodix_thread(__unused void *parameter, __unused wait_result_t result)
 		vm_offset_t gicr = ml_io_map(0x17180000, 0x10000);
 		printf("goodix: probe: the redistributor at %llx says GICR_TYPER %llx\n", (uint64_t)gicr,
 		    (uint64_t)(*(volatile uint64_t *)(gicr + 8)));
+		/* touch_probe_wcomb=1: the same window mapped write-combining instead of VM_WIMG_IO, to see whether it is the
+		 * cache attributes that keep the controller from answering */
+		uint32_t wcomb = 0;
+		PE_parse_boot_argn("touch_probe_wcomb", &wcomb, sizeof(wcomb));
+		if (wcomb) {
+			tlmm = ml_io_map_wcomb(0x0f000000, 0x100000);
+			printf("goodix: probe: the window mapped write-combining at %llx\n", (uint64_t)tlmm);
+		}
 		printf("goodix: probe: reading the pin controller at offset %#x\n", (uint64_t)probe);
 		/* touch_probe_page=1: map only that page, rather than the 1 MB window the driver maps */
 		uint32_t page = 0;
