@@ -63,6 +63,8 @@ extern lck_mtx_t hakios_rsc_lock;
 static vm_offset_t tlmm, gcc, se, rsc, cmd_db;
 
 static uint32_t touch_stage = 9;   /* boot-arg touch_stage=: how far the bring-up goes */
+static uint32_t no_gpio;   /* boot-arg touch_no_gpio=1: touch no pin at all (the one experiment that says whether a
+                            * read or write of the pin controller is what stops this phone) */
 static uint32_t no_rpmh;          /* boot-arg touch_no_rpmh=1: leave the supplies as the boot loader left them */
 
 static inline uint32_t
@@ -1425,6 +1427,10 @@ static void
 show_state(const char *when)
 {
 	/* no clock registers and no straps: this port drives the pins by hand and there is one controller variant */
+	if (no_gpio) {
+		printf("goodix: %s: the pins are not read (touch_no_gpio)\n", when);
+		return;
+	}
 	printf("goodix: %s: pins cs/clk/mosi/miso cfg %#x %#x %#x %#x, reset %#x/%u, int %#x/%u\n", when,
 	    rd(GPIO_CFG(PIN_CS)), rd(GPIO_CFG(PIN_CLK)), rd(GPIO_CFG(PIN_MOSI)), rd(GPIO_CFG(PIN_MISO)),
 	    rd(GPIO_CFG(PIN_RESET)), rd(GPIO_IO(PIN_RESET)), rd(GPIO_CFG(PIN_INT)), rd(GPIO_IO(PIN_INT)));
@@ -1434,6 +1440,10 @@ show_state(const char *when)
 static bool
 power_on(void)
 {
+	if (no_gpio) {
+		printf("goodix: power_on: the pins are left alone (touch_no_gpio)\n");
+		return true;
+	}
 	gpio_output(PIN_RESET, false, PULL_UP, 8);
 	gpio_configure(PIN_INT, 0, PULL_UP, 8, false);
 	/* without its I/O rail the chip must not get the analog supply or be driven: stop before AVDD */
@@ -1580,6 +1590,7 @@ goodix_thread(__unused void *parameter, __unused wait_result_t result)
 	uint32_t stage = 9;
 	PE_parse_boot_argn("touch_stage", &stage, sizeof(stage));
 	PE_parse_boot_argn("touch_no_rpmh", &no_rpmh, sizeof(no_rpmh));
+	PE_parse_boot_argn("touch_no_gpio", &no_gpio, sizeof(no_gpio));
 	touch_stage = stage;
 	printf("goodix: stage %u\n", stage);
 	if (stage < 2) {
@@ -1598,6 +1609,11 @@ goodix_thread(__unused void *parameter, __unused wait_result_t result)
 	cmd_db = ml_io_map_wcomb(CMD_DB_PHYS, CMD_DB_SIZE);      /* memory, not registers: no alignment rules */
 	printf("goodix: cmd_db at %#x\n", (uint64_t)cmd_db);
 	if (stage < 3) {
+		/* stage 2 also reads one pin: the mappings are known to work here, so if this returns the pin controller
+		 * answers and the hang of stage 3 is in what the driver then writes */
+		printf("goodix: probe: gpio0's cfg is %#x\n", rd(GPIO_CFG(0)));
+		printf("goodix: probe: gpio44's cfg is %#x\n", rd(GPIO_CFG(PIN_MISO)));
+		printf("goodix: the pin controller answered\n");
 		thread_terminate(current_thread());
 		return;
 	}
