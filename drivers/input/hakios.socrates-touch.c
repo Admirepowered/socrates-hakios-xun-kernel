@@ -67,6 +67,7 @@ static vm_offset_t tlmm, gcc, se, rsc, cmd_db;
 static vm_offset_t gpio_stride = 0x80;
 
 static uint32_t touch_stage = 9;   /* boot-arg touch_stage=: how far the bring-up goes */
+static uint32_t no_power;  /* boot-arg touch_no_power=1: read the pins but write none of them */
 static uint32_t no_gpio;   /* boot-arg touch_no_gpio=1: touch no pin at all (the one experiment that says whether a
                             * read or write of the pin controller is what stops this phone) */
 static uint32_t no_rpmh;          /* boot-arg touch_no_rpmh=1: leave the supplies as the boot loader left them */
@@ -1444,6 +1445,10 @@ show_state(const char *when)
 static bool
 power_on(void)
 {
+	if (no_power) {
+		printf("goodix: power_on: nothing is written (touch_no_power)\n");
+		return true;
+	}
 	if (no_gpio) {
 		printf("goodix: power_on: the pins are left alone (touch_no_gpio)\n");
 		return true;
@@ -1595,6 +1600,7 @@ goodix_thread(__unused void *parameter, __unused wait_result_t result)
 	PE_parse_boot_argn("touch_stage", &stage, sizeof(stage));
 	PE_parse_boot_argn("touch_no_rpmh", &no_rpmh, sizeof(no_rpmh));
 	PE_parse_boot_argn("touch_no_gpio", &no_gpio, sizeof(no_gpio));
+	PE_parse_boot_argn("touch_no_power", &no_power, sizeof(no_power));
 	{
 		uint32_t stride = 0x80;
 
