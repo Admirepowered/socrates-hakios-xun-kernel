@@ -1339,6 +1339,20 @@ goodix_poll(void)
 			    memcmp(a, b, sizeof(a)) ? "<-- MOVES" : "");
 		}
 	}
+	if (dbg == 3 && (seen.polls % 500) == 0) {
+		static const uint32_t where[] = { 0x10308, 0x13588, 0x14280, 0x10400 };
+		uint8_t at[26];
+
+		printf("goodix: four:");
+		for (unsigned i = 0; i < sizeof(where) / sizeof(where[0]); i++) {
+			if (goodix_read(where[i], at, sizeof(at))) {
+				printf("  %#x: %02x %02x %02x %02x", (uint64_t)where[i], at[0], at[1], at[2], at[3]);
+			} else {
+				printf("  %#x: BAD", (uint64_t)where[i]);
+			}
+		}
+		printf("  int %s\n", gpio_get(PIN_INT) ? "high" : "low");
+	}
 	if (dbg == 1 && (seen.polls % 500) == 0) {
 		static uint8_t raw[8];
 		/* the frame data the chip's own description names: it changes whenever the chip is scanning the panel */
