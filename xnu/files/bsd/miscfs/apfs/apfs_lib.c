@@ -2937,7 +2937,13 @@ cfile_setup(struct apfs_vol *vol, const struct apfs_inode *ino, struct apfs_cfil
 
 	error = cfile_header(vol, ino, &cf->compressed, &cf->type, &cf->size, &cf->in_rsrc);
 	if (error) {
+		apfs_log("inode %llu: cfile_header: %d\n", (unsigned long long)ino->obj_id, error);
 		return error;
+	}
+	if (cf->compressed) {
+		apfs_log("inode %llu: compressed type %u size %llu in_rsrc %d\n",
+		    (unsigned long long)ino->obj_id, (unsigned int)cf->type,
+		    (unsigned long long)cf->size, (int)cf->in_rsrc);
 	}
 	if (!cf->compressed) {
 		cf->ready = true;
@@ -2946,6 +2952,7 @@ cfile_setup(struct apfs_vol *vol, const struct apfs_inode *ino, struct apfs_cfil
 	if (cf->in_rsrc) {
 		error = cfile_read_table(vol, ino, cf);
 		if (error) {
+			apfs_log("inode %llu: cfile_read_table: %d\n", (unsigned long long)ino->obj_id, error);
 			apfs_cfile_fini(cf);
 			return error;
 		}

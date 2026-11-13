@@ -220,6 +220,20 @@ _decmp_get_func(vnode_t vp, uint32_t type, uintptr_t offset, uint32_t discrimina
 		return _func_from_offset(type, offset, discriminator);
 	}
 
+	/*
+	 * A file whose type has no decoder.  Which type, and for which file: the read path is what
+	 * fails, and an answer of EIO from it was otherwise indistinguishable from a broken image.
+	 */
+	{
+		static unsigned reported[256];
+		const char *name = vnode_getname(vp);
+
+		if (reported[type]++ < 5) {
+			printf("hakios decmpfs: no decoder for type %u, asked by %s\n", type,
+			    name != NULL ? name : "?");
+		}
+	}
+
 	// does IOKit know about a kext that is supposed to provide this type?
 	char providesName[80];
 	snprintf(providesName, sizeof(providesName), "com.apple.AppleFSCompression.providesType%u", type);
@@ -2688,8 +2702,13 @@ decmpfs_init(void)
 	decmpfs_ctx = vfs_context_create(vfs_context_kernel());
 
 	register_decmpfs_decompressor(CMP_Type1, &Type1Reg);
-	register_decmpfs_decompressor(3 /* zlib in the attribute */, &Type3Reg);
-	register_decmpfs_decompressor(4 /* zlib pieces in the resource fork */, &Type4Reg);
+	{
+		int r3 = register_decmpfs_decompressor(3 /* zlib in the attribute */, &Type3Reg);
+		int r4 = register_decmpfs_decompressor(4 /* zlib pieces in the resource fork */, &Type4Reg);
+
+		printf("hakios decmpfs: registered 3 -> %d, 4 -> %d (version %d)\n", r3, r4,
+		    (int)DECMPFS_REGISTRATION_VERSION);
+	}
 
 	ktriage_register_subsystem_strings(KDBG_TRIAGE_SUBSYS_DECMPFS, &ktriage_decmpfs_subsystem_strings);
 
