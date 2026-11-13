@@ -207,6 +207,8 @@ static vm_offset_t gpio_stride = 0x1000;
 static vm_offset_t gpio_base = 0;
 
 static uint32_t touch_stage = 9;   /* boot-arg touch_stage=: how far the bring-up goes */
+static uint32_t int_high;  /* boot-arg touch_int_high=1: the interrupt line is asserted high, not low (the pin is
+                            * pulled down on this phone, so a high line is the chip asking, not an idle one) */
 static uint32_t ack_after;  /* boot-arg touch_ack=1: acknowledge every report that was read */
 static uint32_t intdump;   /* boot-arg touch_intdump=1: read the report buffer while the interrupt line is low */
 static uint32_t intdump_seen;
@@ -1240,6 +1242,14 @@ goodix_report(const uint8_t *touches, uint32_t count)
 }
 
 /* Read the report if there is one, and tell the chip it has been read. */
+static bool
+int_asserted(void)
+{
+	bool level = gpio_get(PIN_INT);
+
+	return int_high ? level : !level;
+}
+
 static void
 goodix_poll(void)
 {
@@ -2047,6 +2057,7 @@ goodix_thread(__unused void *parameter, __unused wait_result_t result)
 	PE_parse_boot_argn("touch_arm", &arm, sizeof(arm));
 	PE_parse_boot_argn("touch_intdump", &intdump, sizeof(intdump));
 	PE_parse_boot_argn("touch_ack", &ack_after, sizeof(ack_after));
+	PE_parse_boot_argn("touch_int_high", &int_high, sizeof(int_high));
 	PE_parse_boot_argn("touch_paint", &paint, sizeof(paint));
 	timer_hz = __builtin_arm_rsr64("CNTFRQ_EL0");
 	if (timer_hz < 1000000ULL || timer_hz > 100000000ULL) {
@@ -2220,7 +2231,7 @@ goodix_thread(__unused void *parameter, __unused wait_result_t result)
 		 * (4 November, real fingers, tl: p): the content stood still and then jumped at the end of each swipe, whatever the
 		 * frame rate. So with a finger down every look reads, and with none a report is read every 16 ms anyway.
 		 */
-		if (!gpio_get(PIN_INT) || chip_touching()) {
+		if (int_asserted() || chip_touching()) {
 			idle = 0;
 			chip_poll();
 			read_at = micros_now();
