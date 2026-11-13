@@ -4089,7 +4089,7 @@ fb_command(char *cmd)
 					h = (h ^ ((const uint8_t *)(uintptr_t)resident_rd_pa)[i]) * 0x100000001b3ULL;
 				}
 				/* the reply carries no room for a number: the log has it, and `oem log` fetches that */
-				print("imgsum: %llx of %llx bytes\n", h, (unsigned long long)resident_rd_size);
+				print("imgsum: %x of %x bytes\n", h, (uint64_t)resident_rd_size);
 				fb_reply("OKAY", "");
 			}
 		} else if (starts_with(cmd, "oem screenshot")) {
