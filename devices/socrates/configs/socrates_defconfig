@@ -1,0 +1,4 @@
+# HakiOS defconfig for the Redmi K60 Pro (socrates): the common kernel, the sm8550 family's facts, and this device's own.
+#include common_defconfig
+#include sm8550.config
+#include socrates.config

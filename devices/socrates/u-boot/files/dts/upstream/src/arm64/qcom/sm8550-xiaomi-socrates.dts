@@ -1,0 +1,182 @@
+// SPDX-License-Identifier: BSD-3-Clause
+/*
+ * The Redmi K60 Pro (socrates, SM8550) for HakiOS's U-Boot.
+ *
+ * Only what U-Boot needs: the memory the firmware and the remote processors keep, the panel's framebuffer as the
+ * bootloader left it, the keys, USB as a device (fastboot) and UFS. Every address here is the phone's own: the
+ * reserved memory is the Android device tree's (devices/socrates/prebuilt/device-tree.dtb, pulled from the phone with
+ * `adb exec-out su -c "cat /sys/firmware/fdt"`), and the framebuffer is its cont_splash_region.
+ *
+ * Most of the carve-outs are already in sm8550.dtsi at the same address and size; what is here is what the phone has
+ * and the SoC's tree does not, and the two the phone sizes differently (adspslpi, hwfence).
+ *
+ * The size of RAM is not here: ABL writes it into the device tree it hands over (the appended Android one), and U-Boot
+ * reads it from there (arch/arm/mach-snapdragon/board.c, qcom_parse_memory()).
+ */
+
+/dts-v1/;
+
+#include <dt-bindings/arm/qcom,ids.h>
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/linux-event-codes.h>
+#include <dt-bindings/pinctrl/qcom,pmic-gpio.h>
+#include "sm8550.dtsi"
+#include "pm8010.dtsi"
+#include "pm8550.dtsi"
+#include "pm8550b.dtsi"
+#define PMK8550VE_SID 5
+#include "pm8550ve.dtsi"
+#include "pm8550vs.dtsi"
+#include "pmk8550.dtsi"
+
+/ {
+	model = "Xiaomi Redmi K60 Pro";
+	compatible = "xiaomi,socrates", "qcom,sm8550";
+	chassis-type = "handset";
+
+	/* what ABL matches against; the appended Android device tree carries the same */
+	qcom,msm-id = <QCOM_ID_SM8550 0x10000>;
+	qcom,board-id = <0 0>;
+
+	chosen {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		/*
+		 * The panel as ABL left it: 1440 x 3200, 32 bits, in the cont_splash_region the phone's own tree names
+		 * (0xb8000000, 43 MiB: three buffers). The HakiOS loader knows the phone by this address (xnuloader/
+		 * loader.c, efi_main()). No clocks: U-Boot keeps the display running by not touching it.
+		 */
+		framebuffer0: framebuffer@b8000000 {
+			compatible = "simple-framebuffer";
+			reg = <0x0 0xb8000000 0x0 (1440 * 3200 * 4)>;
+			width = <1440>;
+			height = <3200>;
+			stride = <(1440 * 4)>;
+			format = "a8r8g8b8";
+		};
+	};
+
+	gpio-keys {
+		compatible = "gpio-keys";
+
+		pinctrl-0 = <&kypd_volp_n>;
+		pinctrl-names = "default";
+
+		key-volume-up {
+			label = "Volume Up";
+			gpios = <&pm8550_gpios 6 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_VOLUMEUP>;
+		};
+	};
+
+	reserved-memory {
+		/* the Android device tree's, where sm8550.dtsi has nothing at that address */
+
+		xbl-ramdump@81200000 {
+			reg = <0x0 0x81200000 0x0 0x280000>;
+			no-map;
+		};
+
+		aop-image@81c00000 {
+			reg = <0x0 0x81c00000 0x0 0x60000>;
+			no-map;
+		};
+
+		/* Xiaomi's display dump, and the ramoops the Android kernel keeps its last words in */
+		dump-display@a4a80000 {
+			reg = <0x0 0xa4a80000 0x0 0x800>;
+			no-map;
+		};
+
+		ramoops@a7000000 {
+			reg = <0x0 0xa7000000 0x0 0x400000>;
+			no-map;
+		};
+
+		/* the panel's memory: three 1440 x 3200 x 4 buffers */
+		cont-splash@b8000000 {
+			reg = <0x0 0xb8000000 0x0 0x2b00000>;
+			no-map;
+		};
+
+		llcc-lpi@ff800000 {
+			reg = <0x0 0xff800000 0x0 0x600000>;
+			no-map;
+		};
+
+		/*
+		 * Where the HakiOS loader takes its payload from (PAYLOAD_BASE, 64 MiB with the panic log in its last MiB).
+		 * Mapped (no no-map): the hakios command writes the payload here, and nothing else in U-Boot may take it.
+		 */
+		hakios-payload@f0000000 {
+			reg = <0x0 0xf0000000 0x0 0x4000000>;
+		};
+	};
+};
+
+/* the two the phone sizes differently from the MTP's tree */
+&adspslpi_mem {
+	reg = <0x0 0x9ea00000 0x0 0x4680000>;
+};
+
+&hwfence_shbuf {
+	reg = <0x0 0xe6440000 0x0 0x2dd000>;
+};
+
+&pm8550_gpios {
+	kypd_volp_n: kypd-volp-n-state {
+		pins = "gpio6";
+		function = PMIC_GPIO_FUNC_NORMAL;
+		power-source = <1>;
+		bias-pull-up;
+		input-enable;
+	};
+};
+
+&pon_pwrkey {
+	status = "okay";
+};
+
+&pon_resin {
+	linux,code = <KEY_VOLUMEDOWN>;
+	status = "okay";
+};
+
+&ufs_mem_hc {
+	reset-gpios = <&tlmm 210 GPIO_ACTIVE_LOW>;
+	status = "okay";
+};
+
+&ufs_mem_phy {
+	status = "okay";
+};
+
+/*
+ * USB 2.0 as a device: U-Boot's fastboot; the SuperSpeed PHY is left as ABL left it.
+ * No qcom,select-utmi-as-pipe-clk here: that is for an SoC whose PHY has no pipe clock at all, and SM8550's eUSB2 PHY
+ * (qcom,sm8550-snps-eusb2-phy) has one; the bits U-Boot would set at the SDM845 QSCRATCH offsets are not SM8550's.
+ */
+&usb_1 {
+	/*
+	 * The NOC AXI clock (GCC_CFG_NOC_USB3_PRIM_AXI_CLK, 11) is left out: U-Boot's SM8550 clock driver has no gate for
+	 * it, and clk_get_bulk() fails the whole controller over one clock it does not know ("gcc@0x10000: unknown clock ID
+	 * 11"). ABL left it running, as it left the display running.
+	 */
+	clocks = <&gcc GCC_USB30_PRIM_MASTER_CLK>,
+		 <&gcc GCC_AGGRE_USB3_PRIM_AXI_CLK>,
+		 <&gcc GCC_USB30_PRIM_SLEEP_CLK>,
+		 <&gcc GCC_USB30_PRIM_MOCK_UTMI_CLK>,
+		 <&tcsr TCSR_USB3_CLKREF_EN>;
+	clock-names = "core", "iface", "sleep", "mock_utmi", "xo";
+	dr_mode = "peripheral";
+	maximum-speed = "high-speed";
+	phys = <&usb_1_hsphy>;
+	phy-names = "usb2-phy";
+	status = "okay";
+};
+
+&usb_1_hsphy {
+	status = "okay";
+};
