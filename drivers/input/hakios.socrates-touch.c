@@ -124,6 +124,18 @@ sleep_ms(uint32_t ms)
 	}
 }
 
+/* The same wait, but the rest of the machine gets the processor while it runs. */
+static void
+sleep_yielding(uint32_t us)
+{
+	uint64_t hz = timer_hz ? timer_hz : 19200000ULL;
+	uint64_t end = timer_now() + (hz / 1000000ULL + 1) * (uint64_t)us;
+
+	while (timer_now() < end) {
+		thread_yield_to_preemption();
+	}
+}
+
 /* ---- pins (TLMM) ------------------------------------------------------------------------------- */
 
 #define TLMM_PHYS               0x0f100000UL  /* measured: the window at 0x0f000000 reads but takes no write */
@@ -1865,7 +1877,7 @@ goodix_thread(__unused void *parameter, __unused wait_result_t result)
 			    chip_name(), seen.reports, seen.polls, seen.bad, seen.touches, seen.last_x, seen.last_y,
 			    gpio_get(PIN_INT) ? "high" : "low", reads ? reading / reads : 0, poll_us, report_rate);
 		}
-		sleep_us(poll_us);
+		sleep_yielding(poll_us);
 	}
 }
 
