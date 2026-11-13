@@ -2223,17 +2223,21 @@ goodix_thread(__unused void *parameter, __unused wait_result_t result)
  * then read back, with the first byte of the answer being the acknowledgement (0x80 for yes).
  */
 static bool
-config_command(uint8_t low, uint8_t high, uint8_t extra)
+config_command(uint8_t length, uint8_t command)
 {
 	uint8_t buffer[16], answer[16];
 
+	/*
+	 * The frame the chip's own driver builds (brl_send_cmd): two zero bytes, then the length, then the command byte,
+	 * then a 16-bit checksum of those two and nothing else. Putting a data byte where the checksum belongs -- which is
+	 * what this did -- shifts the whole frame and the chip simply keeps the bytes it was given.
+	 */
 	memset(buffer, 0, sizeof(buffer));
-	buffer[2] = low;
-	buffer[3] = high;
-	buffer[4] = extra;
-	uint32_t sum = (uint32_t)buffer[2] + buffer[3] + buffer[4];
-	buffer[5] = (uint8_t)sum;
-	buffer[6] = (uint8_t)(sum >> 8);
+	buffer[2] = length;
+	buffer[3] = command;
+	uint32_t sum = (uint32_t)buffer[2] + buffer[3];
+	buffer[4] = (uint8_t)sum;
+	buffer[5] = (uint8_t)(sum >> 8);
 	if (!goodix_write(command_address, buffer, sizeof(buffer))) {
 		return false;
 	}
@@ -2247,8 +2251,8 @@ config_command(uint8_t low, uint8_t high, uint8_t extra)
 			return false;
 		}
 		if (look == 0 || answer[0] == GOODIX_ACK_OK) {
-			printf("goodix: config: command %02x%02x answered %02x %02x %02x %02x %02x %02x (look %d)\n",
-			    (uint64_t)high, (uint64_t)low, answer[0], answer[1], answer[2], answer[3], answer[4], answer[5],
+			printf("goodix: config: command %02x answered %02x %02x %02x %02x %02x %02x (look %d)\n",
+			    (uint64_t)command, answer[0], answer[1], answer[2], answer[3], answer[4], answer[5],
 			    (uint64_t)look);
 		}
 		if (answer[0] == GOODIX_ACK_OK || answer[1] == GOODIX_ACK_OK) {
@@ -2270,7 +2274,7 @@ config_download(uint32_t config_address)
 	uint32_t size = (uint32_t)SOCRATES_TOUCH_CONFIG_SIZE;
 
 	printf("goodix: config: writing %u bytes at %#x\n", (uint64_t)size, (uint64_t)config_address);
-	if (!config_command(4, 4, 4)) {
+	if (!config_command(4, 4)) {
 		printf("goodix: config: the write command was not acknowledged\n");
 		return false;
 	}
@@ -2296,11 +2300,15 @@ config_download(uint32_t config_address)
 		return false;
 	}
 	printf("goodix: config: %u bytes written and read back the same\n", (uint64_t)size);
-	if (!config_command(0, 5, 4)) {
+	if (!config_command(4, 5)) {
 		printf("goodix: config: the apply command was not acknowledged\n");
 		return false;
 	}
 	sleep_ms(10);
+	/*
+	 * A reset after the configuration goes in: the chip puts a new configuration to work on its next start, and until
+	 * then it keeps answering with what it had.
+	 */
 	printf("goodix: config: the chip has its configuration\n");
 	return true;
 }
