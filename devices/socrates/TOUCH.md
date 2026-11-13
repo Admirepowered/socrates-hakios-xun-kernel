@@ -82,6 +82,32 @@ through `nx_block(vol->nx, addr, &blk, false)`; diagnostics placed at `ext_begin
 physical-range check all stayed silent, so the failure is at the block read inside that loop or at `ext_next` returning
 something other than ENOENT. That is where the next run's diagnostic belongs.
 
+### The large type-4 reads, traced to one call
+
+The chain below was measured on the phone, one diagnostic at a time; every line is a call that returns 5, in order:
+
+```
+hakios exec: read launchd.darwin: error 5 resid 16384
+apfs: inode 60968: rsrc xattr flags 0x1 stream 70234 of 200749
+apfs: stream 70234: enters for 16 at 0 of 200749
+apfs: ext_begin 70234 at 0: the volume tree
+apfs: apfs_seek 70234 type 8: seek_to: 5 (tree root 2506)
+apfs: ext_begin 70234: 5
+apfs: stream 70234: ext_begin at 0 of 200749: 5
+apfs: inode 60968: rsrc head read: 5
+```
+
+So the extent lookup goes through the volume tree (not the file extent tree — `has_fext` is false on this
+volume), into `apfs_seek` with `type 8` (`APFS_TYPE_FILE_EXTENT`), and `seek_to` is what answers EIO. That is
+the one call left to instrument.
+
+What separates the files that work from the ones that do not is the identifier alone: streams 123, 146 and 147
+(resource forks of 1782, 17705 and 6354 bytes) seek fine, while 70234 and 70268 (200749 and 318163 bytes) fail
+on the very same code path with the same volume. Tree root is 2506 in both cases, so the tree opens; the walk
+inside `seek_to` is where they part. `omap_find`, which `seek_to` reaches for the object's mapping, has
+`if (!omap->ready) return EIO;` as its first answer, and two more EIO returns inside its descent — those are
+the next lines to report.
+
 ### A trap that costs a boot each time
 
 `oem run` must be preceded by a fresh `oem ramdisk` and `stage` of `userland/system.apfs`. Without it the resident image

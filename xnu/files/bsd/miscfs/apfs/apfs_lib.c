@@ -1418,7 +1418,14 @@ apfs_seek(struct apfs_btree *tree, uint64_t obj_id, uint8_t type,
 {
 	struct seek_target t = { .obj_id = obj_id, .type = type };
 
-	return seek_to(tree, &t, cur);
+	int error = seek_to(tree, &t, cur);
+
+	if (error) {
+		apfs_log("apfs_seek %llu type %u: seek_to: %d (tree root %llu, has_fext %d)\n",
+		    (unsigned long long)obj_id, (unsigned)type, error,
+		    (unsigned long long)tree->root);
+	}
+	return error;
 }
 
 /*
@@ -2245,6 +2252,8 @@ fext_seek(struct apfs_btree *tree, uint64_t id, uint64_t off, struct apfs_cursor
 	cur->tree = tree;
 	error = node_at(tree, addr, &blk, &n);
 	if (error) {
+		apfs_log("fext_seek %llu at %llu: root %llu: %d\n", (unsigned long long)id,
+		    (unsigned long long)off, (unsigned long long)addr, error);
 		return error;
 	}
 	for (;;) {
@@ -2269,6 +2278,9 @@ fext_seek(struct apfs_btree *tree, uint64_t id, uint64_t off, struct apfs_cursor
 				return error;
 			}
 			if (kl < 16) {
+				apfs_log("fext_seek %llu: entry %u of %u has a key of %u bytes (leaf %d, level %u)\n",
+				    (unsigned long long)id, mid, (unsigned)n.nkeys, (unsigned)kl,
+				    (int)n.leaf, (unsigned)n.level);
 				return EIO;
 			}
 			if (le64(k) < id || (le64(k) == id && le64(k + 8) <= off)) {
@@ -2284,6 +2296,8 @@ fext_seek(struct apfs_btree *tree, uint64_t id, uint64_t off, struct apfs_cursor
 		}
 		error = node_child_addr(tree, &n, pick, &addr, NULL);
 		if (error) {
+			apfs_log("fext_seek %llu: child %u at depth %u: %d\n", (unsigned long long)id,
+			    pick, (unsigned)cur->depth, error);
 			return error;
 		}
 		if (cur->depth + 1 >= APFS_MAX_LEVELS) {
@@ -2292,6 +2306,8 @@ fext_seek(struct apfs_btree *tree, uint64_t id, uint64_t off, struct apfs_cursor
 		cur->depth++;
 		error = node_at(tree, addr, &blk, &n);
 		if (error) {
+			apfs_log("fext_seek %llu: node %llu at depth %u: %d\n", (unsigned long long)id,
+			    (unsigned long long)addr, (unsigned)cur->depth, error);
 			return error;
 		}
 	}
@@ -2300,12 +2316,21 @@ fext_seek(struct apfs_btree *tree, uint64_t id, uint64_t off, struct apfs_cursor
 static int
 ext_begin(struct apfs_vol *vol, uint64_t id, uint64_t off, struct ext_iter *it)
 {
+	int error;
+
 	it->id = id;
 	it->fext = vol->has_fext;
+	apfs_log("ext_begin %llu at %llu: %s\n", (unsigned long long)id, (unsigned long long)off,
+	    it->fext ? "the file extent tree" : "the volume tree");
 	if (it->fext) {
-		return fext_seek(&vol->fext, id, off, &it->cur);
+		error = fext_seek(&vol->fext, id, off, &it->cur);
+	} else {
+		error = apfs_seek(&vol->tree, id, APFS_TYPE_FILE_EXTENT, &it->cur);
 	}
-	return apfs_seek(&vol->tree, id, APFS_TYPE_FILE_EXTENT, &it->cur);
+	if (error) {
+		apfs_log("ext_begin %llu: %d\n", (unsigned long long)id, error);
+	}
+	return error;
 }
 
 /* The next extent; ENOENT after the last. */
