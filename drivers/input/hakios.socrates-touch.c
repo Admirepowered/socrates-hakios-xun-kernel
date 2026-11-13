@@ -151,6 +151,7 @@ sleep_yielding(uint32_t us)
 #define GPIO_IO(n)              (tlmm + gpio_base + gpio_stride * (n) + 4)  /* bit 0 in, bit 1 out */
 #define PULL_NONE               0
 #define PULL_UP                 3
+#define PULL_DOWN               1
 
 #define PIN_MISO                44      /* QUP1 SE4's four; which of the two data pins is which the driver finds out */
 #define PIN_MOSI                45
@@ -842,6 +843,30 @@ le32(const uint8_t *p)
 	return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24;
 }
 
+/*
+ * The one byte the chip's own driver writes to 0xC900 after every reset and reads back (brl_select_spi_mode: up to five
+ * tries, expecting the value to come back), which is how it tells a chip on a SPI bus which interface to answer on. The
+ * reference driver does this on every reset, before it reads anything else.
+ */
+static bool
+spi_mode_select(void)
+{
+	for (int attempt = 0; attempt < 5; attempt++) {
+		uint8_t out = 1, back = 0;
+
+		if (!goodix_write(0xC900, &out, 1) || !goodix_read(0xC900, &back, 1)) {
+			continue;
+		}
+		if (back == out) {
+			printf("goodix: the chip took the SPI mode byte (0xC900 = %#x)\n", (uint64_t)back);
+			return true;
+		}
+		printf("goodix: SPI mode byte came back as %#x, trying again\n", (uint64_t)back);
+	}
+	printf("goodix: the chip did not take the SPI mode byte\n");
+	return false;
+}
+
 static void
 touch_reset(void)
 {
@@ -853,6 +878,7 @@ touch_reset(void)
 	gpio_set(PIN_RESET, true);
 	printf("goodix: reset: high written\n");
 	sleep_ms(100);
+	spi_mode_select();
 	printf("goodix: reset: done\n");
 }
 
@@ -910,6 +936,23 @@ goodix_probe(bool verbose)
 		}
 	}
 	printf("goodix: touch report at %#x, coordinates up to %u x %u\n", touch_address, max_x, max_y);
+	/*
+	 * touch_icdump=1: the words of the description the addresses come from, so that the configuration identity the
+	 * chip reports can be compared with the one Android's driver prints (config id 0x640fdf7d). A chip whose
+	 * configuration is not there does not report touches.
+	 */
+	{
+		uint32_t dump = 0;
+
+		if (PE_parse_boot_argn("touch_icdump", &dump, sizeof(dump)) && dump) {
+			printf("goodix: ic: region at %u, length %u, command %#x, touch %#x\n", (uint64_t)offset,
+			    (uint64_t)length, (uint64_t)command_address, (uint64_t)touch_address);
+			for (unsigned i = 0; i < 24 && offset + 4 * i + 4 <= length; i++) {
+				printf("goodix: ic: +%3u: %#x\n", (uint64_t)(offset + 4 * i),
+				    (uint64_t)le32(info + offset + 4 * i));
+			}
+		}
+	}
 	return touch_address != 0;
 }
 
@@ -1049,13 +1092,21 @@ goodix_poll(void)
 	 * touch_intdump=1: a read taken the moment the interrupt line is low, and what it says -- up to forty times, so a
 	 * chip that only fills its buffer while it is asserting can be told from one that never fills it at all.
 	 */
-	if (intdump && !gpio_get(PIN_INT) && intdump_seen < 40) {
-		uint8_t now[8];
+	if (intdump && !gpio_get(PIN_INT) && intdump_seen < 20) {
+		/*
+		 * Both fields of the chip's description, read the way its own driver reads them: twenty-six bytes at the
+		 * command address (the interrupt handler reads exactly that and tests bit 7 of the first byte) and eight at
+		 * the one the print calls the touch data.
+		 */
+		static uint8_t at_cmd[26], at_touch[8];
 
-		if (goodix_read(touch_address, now, sizeof(now))) {
+		if (goodix_read(command_address, at_cmd, sizeof(at_cmd)) &&
+		    goodix_read(touch_address, at_touch, sizeof(at_touch))) {
 			intdump_seen++;
-			printf("goodix: int: %02x %02x %02x %02x %02x %02x %02x %02x\n", now[0], now[1], now[2], now[3],
-			    now[4], now[5], now[6], now[7]);
+			printf("goodix: int: cmd %#x: %02x %02x %02x %02x %02x %02x %02x %02x | touch %#x: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+			    (uint64_t)command_address, at_cmd[0], at_cmd[1], at_cmd[2], at_cmd[3], at_cmd[4], at_cmd[5],
+			    at_cmd[6], at_cmd[7], (uint64_t)touch_address, at_touch[0], at_touch[1], at_touch[2],
+			    at_touch[3], at_touch[4], at_touch[5], at_touch[6], at_touch[7]);
 		}
 	}
 	if (arm) {
@@ -1626,8 +1677,8 @@ power_on(void)
 		printf("goodix: power_on: the pins are left alone (touch_no_gpio)\n");
 		return true;
 	}
-	gpio_output(PIN_RESET, false, PULL_UP, 8);
-	gpio_configure(PIN_INT, 0, PULL_UP, 8, false);
+	gpio_output(PIN_RESET, false, PULL_DOWN, 2);
+	gpio_configure(PIN_INT, 0, PULL_DOWN, 2, false);
 	/* without its I/O rail the chip must not get the analog supply or be driven: stop before AVDD */
 	if (!io_supply_on()) {
 		return false;
