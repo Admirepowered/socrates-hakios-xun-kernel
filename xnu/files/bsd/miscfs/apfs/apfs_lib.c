@@ -312,6 +312,12 @@ nx_block_unlocked(struct apfs_nx *nx, uint64_t addr, const uint8_t **out, bool v
 	t0 = apfs_ticks();
 	error = nx->dev.read_data(nx->dev.ctx, first * (uint64_t)bs, mine, (size_t)count * bs);
 	dt = apfs_ticks() - t0;
+	if (addr == 2632) {
+		apfs_log("nx_block 2632: run %llu count %llu offset %llu len %zu error %d first bytes %02x %02x %02x %02x\n",
+		    (unsigned long long)first, (unsigned long long)count,
+		    (unsigned long long)(first * (uint64_t)bs), (size_t)count * bs, error,
+		    mine[0], mine[1], mine[2], mine[3]);
+	}
 	nx_relock(nx);
 	nx->dev_ticks += dt;
 	nx->dev_calls++;
@@ -1343,6 +1349,8 @@ seek_to(struct apfs_btree *tree, const struct seek_target *t, struct apfs_cursor
 	cur->tree = tree;
 	error = node_at(tree, addr, &blk, &n);
 	if (error) {
+		apfs_log("seek_to %llu type %u: root %llu will not read: %d\n",
+		    (unsigned long long)t->obj_id, (unsigned)t->type, (unsigned long long)addr, error);
 		return error;
 	}
 	cur->depth = 0;
@@ -1368,9 +1376,15 @@ seek_to(struct apfs_btree *tree, const struct seek_target *t, struct apfs_cursor
 
 				error = node_entry(tree, &n, mid, &k, &kl, &v, &vl);
 				if (error) {
+					apfs_log("seek_to %llu: entry %u of %u at depth %u: %d\n",
+					    (unsigned long long)t->obj_id, mid, (unsigned)n.nkeys,
+					    (unsigned)cur->depth, error);
 					return error;
 				}
 				if (kl < 8) {
+					apfs_log("seek_to %llu: entry %u of %u has a %u-byte key at depth %u\n",
+					    (unsigned long long)t->obj_id, mid, (unsigned)n.nkeys,
+					    (unsigned)kl, (unsigned)cur->depth);
 					return EIO;
 				}
 				if (seek_cmp(k, kl, t) < 0) {
@@ -1397,6 +1411,8 @@ seek_to(struct apfs_btree *tree, const struct seek_target *t, struct apfs_cursor
 
 			error = node_child_addr(tree, &n, pick, &addr, &h8);
 			if (error) {
+				apfs_log("seek_to %llu: child %u at depth %u: %d\n",
+				    (unsigned long long)t->obj_id, pick, (unsigned)cur->depth, error);
 				return error;
 			}
 			if (cur->depth + 1 >= APFS_MAX_LEVELS) {
@@ -1405,6 +1421,11 @@ seek_to(struct apfs_btree *tree, const struct seek_target *t, struct apfs_cursor
 			cur->depth++;
 			cur->hash8[cur->depth] = h8;
 			error = node_at_h(tree, addr, h8, &blk, &n);
+			if (error) {
+				apfs_log("seek_to %llu: node %llu at depth %u: %d\n",
+				    (unsigned long long)t->obj_id, (unsigned long long)addr,
+				    (unsigned)cur->depth, error);
+			}
 		}
 		if (error) {
 			return error;
