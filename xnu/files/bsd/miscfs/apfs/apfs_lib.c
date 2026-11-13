@@ -2358,6 +2358,8 @@ apfs_extent_at(struct apfs_vol *vol, uint64_t stream_id, uint64_t off,
 
 	error = ext_begin(vol, stream_id, off, &it);
 	if (error) {
+		apfs_log("stream %llu: ext_begin at %llu: %d\n", (unsigned long long)stream_id,
+		    (unsigned long long)off, error);
 		return error;
 	}
 	/*
@@ -2455,6 +2457,9 @@ apfs_read_stream(struct apfs_vol *vol, uint64_t stream_id, uint64_t stream_size,
 			return error;
 		}
 		if (length == 0 || (length % bs) != 0) {
+			apfs_log("stream %llu: extent at %llu of %llu bytes (bs %u): bad length\n",
+			    (unsigned long long)stream_id, (unsigned long long)logical,
+			    (unsigned long long)length, bs);
 			return EIO;
 		}
 		if (logical >= end) {
@@ -2465,6 +2470,10 @@ apfs_read_stream(struct apfs_vol *vol, uint64_t stream_id, uint64_t stream_size,
 		}
 		if (phys >= vol->nx->block_count ||
 		    length / bs > vol->nx->block_count - phys) {
+			apfs_log("stream %llu: extent phys %llu + %llu blocks, volume has %llu\n",
+			    (unsigned long long)stream_id, (unsigned long long)phys,
+			    (unsigned long long)(length / bs),
+			    (unsigned long long)vol->nx->block_count);
 			return EIO;
 		}
 		if (phys + length / bs - 1 > vol->nx->max_data_addr) {
@@ -2815,9 +2824,14 @@ cfile_read_table(struct apfs_vol *vol, const struct apfs_inode *ino,
 
 	error = apfs_xattr_lookup(vol, ino->obj_id, APFS_RSRC_FORK_XATTR_NAME, &xa);
 	if (error) {
+		apfs_log("inode %llu: rsrc xattr lookup: %d\n", (unsigned long long)ino->obj_id, error);
 		return error;
 	}
+	apfs_log("inode %llu: rsrc xattr flags %#x stream %llu of %llu\n",
+	    (unsigned long long)ino->obj_id, (unsigned int)xa.flags,
+	    (unsigned long long)xa.stream_id, (unsigned long long)xa.stream_size);
 	if ((xa.flags & APFS_XATTR_DATA_STREAM) == 0) {
+		apfs_log("inode %llu: rsrc embedded, not a stream\n", (unsigned long long)ino->obj_id);
 		return ENOTSUP;         /* a resource fork small enough to be embedded */
 	}
 	cf->rsrc_id = xa.stream_id;
@@ -2829,11 +2843,15 @@ cfile_read_table(struct apfs_vol *vol, const struct apfs_inode *ino,
 	error = apfs_read_stream(vol, cf->rsrc_id, cf->rsrc_size, 0, head, sizeof(head),
 	    &got);
 	if (error) {
+		apfs_log("inode %llu: rsrc head read: %d\n", (unsigned long long)ino->obj_id, error);
 		return error;
 	}
 	if (got < sizeof(head)) {
+		apfs_log("inode %llu: rsrc head read gave %zu of 16\n", (unsigned long long)ino->obj_id, got);
 		return EIO;
 	}
+	apfs_log("inode %llu: rsrc %llu bytes for %llu of file\n", (unsigned long long)ino->obj_id,
+	    (unsigned long long)cf->rsrc_size, (unsigned long long)cf->size);
 	cf->table_base = (uint64_t)be32(head) + 4;
 	if (cf->table_base + 4 > cf->rsrc_size) {
 		return EIO;
@@ -2847,6 +2865,8 @@ cfile_read_table(struct apfs_vol *vol, const struct apfs_inode *ino,
 		return EIO;
 	}
 	cf->piece_count = le32(head);
+	apfs_log("inode %llu: %u pieces, file %llu bytes\n", (unsigned long long)ino->obj_id,
+	    (unsigned int)cf->piece_count, (unsigned long long)cf->size);
 	if (cf->piece_count == 0 ||
 	    cf->piece_count != (uint32_t)((cf->size + APFS_DECMPFS_BLOCK_SIZE - 1) /
 	    APFS_DECMPFS_BLOCK_SIZE)) {
@@ -4075,6 +4095,11 @@ apfs_read_file(struct apfs_vol *vol, const struct apfs_inode *ino,
 		borrowed = true;
 	}
 	error = apfs_cfile_init(vol, ino, cf);
+	if (error != 0) {
+		apfs_log("inode %llu: cfile_init: %d (read %llu at %llu)\n",
+		    (unsigned long long)ino->obj_id, error, (unsigned long long)len,
+		    (unsigned long long)off);
+	}
 	if (error == 0) {
 		if (!cf->compressed) {
 			error = ino->has_dstream

@@ -37,6 +37,58 @@ Everything below came from the phone, not from a document.
 - ftrace/kprobes on Android to capture the driver's own reads — **kprobes do not fire at all on this kernel** (a probe on `vfs_read` also yields nothing).
 - Android's `read_cfg` sysfs node — the callback it needs is not registered (`EINVAL`).
 
+## The boot: where it stands now
+
+The userland starts. `=== init: process 1, started as /redwood/sbin/init ===`, and it runs its 36 checks — the file
+system, mmap and page-in, fork, exec, pipes, 300 files in a directory — of which **35 pass**. The two that do not are
+both the same fault, described below.
+
+### What was wrong, in the end
+
+`decmpfs_init` registered `CMP_Type1` only (bytes stored as they are). Every file in this image is compressed:
+`/sbin/launchd` (34 KB) is **type 3**, one zlib stream in the `com.apple.decmpfs` attribute, and anything too large for
+an attribute — `/sbin/launchd.darwin` (525 KB), `dyld` (922 KB) — is **type 4**, 64 KB zlib pieces in the
+com.apple.ResourceFork attribute. With no decoder for either, `decmp_get_func()` answered NULL, the read failed, and what
+the exec was handed was not the file at all. That is the errno 8 that looked like a bad Mach-O.
+
+Both are now registered (`bsd/kern/decmpfs.c`, `Type3Reg` and `Type4Reg`, decoding through the kernel's own zlib, the one
+APFS already uses). With type 3 in place the userland started.
+
+### The remaining fault, located exactly
+
+Reading a large type 4 file fails with EIO, and the chain is now pinned down step by step:
+
+```
+hakios exec: read launchd.darwin: error 5 resid 16384          (the first PAGE_SIZE of an image)
+hakios apfs: cached read of launchd.darwin at 0 for 16384: 5
+apfs: inode 60968: cfile_init: 5 (read 65536 at 0)
+apfs: inode 60968: rsrc xattr flags 0x1 stream 70234 of 200749
+apfs: inode 60968: rsrc head read: 5                           (apfs_read_stream of 16 bytes failed)
+```
+
+The pattern across every file read in a boot is clean:
+
+| inode | resource fork | stream id | result |
+|---|---|---|---|
+| 54 | 1782 bytes | 123 | read |
+| 95 | 17705 bytes | 146 | read |
+| 97 | 6354 bytes | 147 | read |
+| 60968 (`launchd.darwin`) | 200749 bytes | **70234** | **EIO** |
+| 61038 (`dyld`) | 318163 bytes | **70268** | **EIO** |
+
+Small resource forks read, large ones do not, and the split follows the stream id — the small ids (123–147) work, the
+large ones (70234, 70268) do not. `apfs_read_stream` walks the extents with `ext_begin`/`ext_next` and copies each block
+through `nx_block(vol->nx, addr, &blk, false)`; diagnostics placed at `ext_begin`, at the length check and at the
+physical-range check all stayed silent, so the failure is at the block read inside that loop or at `ext_next` returning
+something other than ENOENT. That is where the next run's diagnostic belongs.
+
+### A trap that costs a boot each time
+
+`oem run` must be preceded by a fresh `oem ramdisk` and `stage` of `userland/system.apfs`. Without it the resident image
+is out of date and the boot stops at `load_init_program: failed loading /sbin/launchd: errno 8` — a face of the same
+message that has nothing to do with decmpfs, and which sent more than one round chasing the wrong thing. The loader's
+`oem imgsum` reports a checksum of what is staged: `68ded9e137bce937 of 93aa5000 bytes` for the image built at 00:37.
+
 ## The boot, as far as it got, and what each experiment settled
 
 The touch screen cannot be judged on a phone whose userland never starts, so a good part of the work went into the
