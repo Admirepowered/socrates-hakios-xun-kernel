@@ -941,6 +941,11 @@ goodix_write(uint32_t address, const uint8_t *data, uint32_t length)
 	if (length > GOODIX_MAX_READ) {
 		return false;
 	}
+	/*
+	 * Eight bytes in front of the data, the shape a read has: the write opcode 0xF0, the address as four big-endian
+	 * bytes, and then three 0xFF. Sending only five (opcode and address) put the first data byte where the chip expects
+	 * padding, and every write came back as the bytes it had just been given.
+	 */
 	spi_tx[0] = 0xf0;
 	spi_tx[1] = (uint8_t)(address >> 24);
 	spi_tx[2] = (uint8_t)(address >> 16);
@@ -1080,6 +1085,15 @@ goodix_probe(bool verbose)
 
 		if (PE_parse_boot_argn("touch_cfgread", &want, sizeof(want)) && want) {
 			/* the address the chip's description gives for its configuration: the second of the four it lists */
+			/* boot-arg touch_cmdaddr=<hex>: which area the configuration commands are written to. The ones the
+			 * chip's description gives are 0x10174 (its first word) and 0x10308 (the upper half of its sixth), and
+			 * which of them the command area really is decides whether the chip acknowledges anything. */
+			uint32_t cmd_override = 0;
+
+			if (PE_parse_boot_argn("touch_cmdaddr", &cmd_override, sizeof(cmd_override)) && cmd_override) {
+				command_address = cmd_override;
+				printf("goodix: config: commands go to %#x\n", (uint64_t)command_address);
+			}
 			config_probe(le32(info + offset + 12));
 			config_download(le32(info + offset + 12));
 		}
