@@ -71,6 +71,7 @@ static vm_offset_t gpio_stride = 0x1000;
 static vm_offset_t gpio_base = 0;
 
 static uint32_t touch_stage = 9;   /* boot-arg touch_stage=: how far the bring-up goes */
+static uint32_t big;       /* boot-arg touch_bigread=1: read the whole 2500-byte report buffer every poll */
 static uint32_t dbg;       /* boot-arg touch_dbg=1: the raw bytes of a report every so many polls, and the
                             * interrupt line with them, so that a chip which finds no finger can be told apart
                             * from one whose reports are not being read */
@@ -754,7 +755,10 @@ static bool (*spi_transfer)(const uint8_t *tx, uint8_t *rx, uint32_t length);
 
 #define GOODIX_FW_VERSION       0x10014         /* 28 bytes */
 #define GOODIX_IC_INFO          0x10070         /* a 16-bit length, then that many bytes */
-#define GOODIX_MAX_READ         1024
+#define GOODIX_MAX_READ         4096
+/* The chip's own driver reads 2500 bytes of the report buffer on every interrupt (goodix_core.ko, the event
+ * handler's read call). Reading a buffer short leaves it undrained. */
+#define GOODIX_REPORT_READ      2500
 #define GOODIX_MAX_TOUCHES      10
 #define GOODIX_STATUS_TOUCH     0x80
 #define GOODIX_STATUS_REQUEST   0x40
@@ -771,6 +775,12 @@ goodix_read(uint32_t address, uint8_t *data, uint32_t length)
 	if (length > GOODIX_MAX_READ) {
 		return false;
 	}
+	/*
+	 * Nine bytes in front of the data, not eight: the chip's own driver sends the read opcode, the address as four
+	 * big-endian bytes and then 0xFF four times (goodix_spi_read_bra in goodix_core.ko: 0xF1 at [0], the address at
+	 * [1..4], a 32-bit 0xFFFFFFFF at [5]). With three 0xFF the answer came back shifted by a byte, which is why the
+	 * version still read as text and the report buffer never looked like a report.
+	 */
 	spi_tx[0] = 0xf1;
 	spi_tx[1] = (uint8_t)(address >> 24);
 	spi_tx[2] = (uint8_t)(address >> 16);
@@ -1018,13 +1028,64 @@ goodix_poll(void)
 	uint32_t count;
 
 	seen.polls++;
-	if (dbg && (seen.polls % 500) == 0) {
-		static uint8_t raw[8];
-		bool ok = goodix_read(touch_address, raw, sizeof(raw));
+	/*
+	 * touch_dbg=2: the words around the report address, read twice, and which of them moved. The chip's description
+	 * names 0x10308 and the frame data at 0x10400 is seen to change with the panel, but the report word reads the same
+	 * every time -- so this says whether a neighbouring word is the live one.
+	 */
+	/*
+	 * touch_bigread=1: the whole buffer, the way the chip's own driver reads it -- the head of it is the report, and
+	 * reading all of it is what leaves the buffer empty for the next frame.
+	 */
+	if (big) {
+		static uint8_t whole[GOODIX_REPORT_READ];
 
-		printf("goodix: dbg: poll %u: read %s, %02x %02x %02x %02x %02x %02x %02x %02x, interrupt %s\n",
-		    seen.polls, ok ? "ok" : "FAILED", raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
-		    gpio_get(PIN_INT) ? "high" : "low");
+		if (!goodix_read(touch_address, whole, sizeof(whole))) {
+			seen.bad++;
+			return;
+		}
+		memcpy(report, whole, 8);
+		if (dbg && (seen.polls % 500) == 0) {
+			printf("goodix: dbg: poll %u (whole buffer): %02x %02x %02x %02x %02x %02x %02x %02x, int %s\n", seen.polls,
+			    whole[0], whole[1], whole[2], whole[3], whole[4], whole[5], whole[6], whole[7],
+			    gpio_get(PIN_INT) ? "high" : "low");
+		}
+		if (report[0] == 0) {
+			return;
+		}
+	} else if (dbg == 2 && (seen.polls % 500) == 0) {
+		for (unsigned w = 0; w < 12; w++) {
+			uint32_t at = touch_address - 8 + 4 * w;
+			uint8_t a[8], b[8];
+			bool ok1 = goodix_read(at, a, sizeof(a)), ok2 = goodix_read(at, b, sizeof(b));
+
+			if (!ok1 || !ok2) {
+				printf("goodix: scan: %#x: read failed\n", (uint64_t)at);
+				continue;
+			}
+			printf("goodix: scan: %#x: %02x %02x %02x %02x %02x %02x %02x %02x %s\n", (uint64_t)at,
+			    a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7],
+			    memcmp(a, b, sizeof(a)) ? "<-- MOVES" : "");
+		}
+	}
+	if (dbg == 1 && (seen.polls % 500) == 0) {
+		static uint8_t raw[8];
+		/* the frame data the chip's own description names: it changes whenever the chip is scanning the panel */
+		static uint8_t frame[16], frame2[16];
+		bool ok = goodix_read(touch_address, raw, sizeof(raw));
+		bool f1 = goodix_read(0x10400, frame, sizeof(frame));
+		bool f2 = goodix_read(0x10400, frame2, sizeof(frame2));
+
+		/*
+		 * The interrupt pin's own registers go in with it: if the pin is not configured as an input the level read
+		 * back is whatever the pad happens to hold, and "no data" would be the driver's own mistake rather than the
+		 * chip's word.
+		 */
+		printf("goodix: dbg: poll %u: touch %s %02x %02x %02x %02x %02x %02x %02x %02x; frame %s %02x %02x %02x %02x / %02x %02x %02x %02x; int %s (cfg %#x, io %#x)\n",
+		    seen.polls, ok ? "ok" : "BAD", raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
+		    (f1 && f2) ? (memcmp(frame, frame2, sizeof(frame)) ? "moving" : "frozen") : "BAD",
+		    frame[0], frame[1], frame[2], frame[3], frame2[0], frame2[1], frame2[2], frame2[3],
+		    gpio_get(PIN_INT) ? "high" : "low", (uint64_t)rd(GPIO_CFG(PIN_INT)), (uint64_t)rd(GPIO_IO(PIN_INT)));
 	}
 	if (!goodix_read(touch_address, report, first) || report[0] == 0) {
 		return;
@@ -1674,6 +1735,8 @@ goodix_thread(__unused void *parameter, __unused wait_result_t result)
 {
 	unsigned idle = 0, idle_looks;
 	uint32_t poll_us = 8000, latency = 0, reads = 0;
+	uint32_t paint = 0;
+	vm_offset_t fb = 0;
 	uint64_t before = 0, reading = 0;
 
 	printf("goodix: the thread is up\n");
@@ -1695,6 +1758,8 @@ goodix_thread(__unused void *parameter, __unused wait_result_t result)
 	PE_parse_boot_argn("touch_no_power", &no_power, sizeof(no_power));
 	PE_parse_boot_argn("touch_slow", &slow, sizeof(slow));
 	PE_parse_boot_argn("touch_dbg", &dbg, sizeof(dbg));
+	PE_parse_boot_argn("touch_bigread", &big, sizeof(big));
+	PE_parse_boot_argn("touch_paint", &paint, sizeof(paint));
 	timer_hz = __builtin_arm_rsr64("CNTFRQ_EL0");
 	if (timer_hz < 1000000ULL || timer_hz > 100000000ULL) {
 		timer_hz = 19200000ULL;         /* what the boot loader read out of the counter's own frequency register */
@@ -1888,6 +1953,19 @@ goodix_thread(__unused void *parameter, __unused wait_result_t result)
 			    "interrupt line %s; a report takes %llu us to read; the line looked at every %u us, reports %s a second\n",
 			    chip_name(), seen.reports, seen.polls, seen.bad, seen.touches, seen.last_x, seen.last_y,
 			    gpio_get(PIN_INT) ? "high" : "low", reads ? reading / reads : 0, poll_us, report_rate);
+		}
+		/*
+		 * touch_paint=1: a pixel that changes every few polls. The touch controller sits on the display's own substrate
+		 * and may only report while the panel is being refreshed; the port's screen is a still image, never redrawn.
+		 */
+		if (paint && (tick % 8) == 0) {
+			if (fb == 0) {
+				fb = ml_io_map(0xb8000000, 0x400000);
+
+			}
+			if (fb != 0) {
+				*(volatile uint32_t *)(fb + 4 * (tick / 8 % 1024)) = (tick & 0x100) ? 0x00ffffff : 0x000000ff;
+			}
 		}
 		sleep_yielding(poll_us);
 	}
