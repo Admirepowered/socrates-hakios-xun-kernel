@@ -2355,7 +2355,7 @@ config_probe(uint32_t config_address)
 	 * known rather than inferred.
 	 */
 	{
-		static const uint32_t places[] = { 0x10174, 0x10218, 0x10400, 0x10308, 0x10000, 0x10680 };
+		static const uint32_t places[] = { 0x10cf4, 0x13c40, 0x13588, 0x13600, 0x10218, 0x10000 };
 
 		for (unsigned i = 0; i < sizeof(places) / sizeof(places[0]); i++) {
 			uint8_t page[64];
