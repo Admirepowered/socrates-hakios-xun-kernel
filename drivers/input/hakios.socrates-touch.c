@@ -64,11 +64,11 @@ static vm_offset_t tlmm, gcc, se, rsc, cmd_db;
 /* boot-arg touch_stride=<hex>: the distance between two pins' registers. The reference phone's tree and U-Boot both
  * say 0x1000, which on this phone walks off the block the controller answers in (a read there stops the phone);
  * 214 pins fit in the 32 KiB it does answer, at 0x80 each, which is what this port starts from. */
-static vm_offset_t gpio_stride = 0x80;
+static vm_offset_t gpio_stride = 0x1000;
 /* boot-arg touch_pin_base=<hex>: where pin 0's registers start inside the window. Measured on this phone: the
  * window answers from 0x1000 to about 0x9000 and nowhere else, and 214 pins at 0x80 each fill 0x1000..0x7b00 of it
  * exactly — which is also where pin 24 (the reset line) and pins 44-47 (the bus) answer. */
-static vm_offset_t gpio_base = 0x1000;
+static vm_offset_t gpio_base = 0;
 
 static uint32_t touch_stage = 9;   /* boot-arg touch_stage=: how far the bring-up goes */
 static uint32_t slow;      /* boot-arg touch_slow=1: three seconds before each step of the bring-up, so that what
@@ -126,8 +126,8 @@ sleep_ms(uint32_t ms)
 
 /* ---- pins (TLMM) ------------------------------------------------------------------------------- */
 
-#define TLMM_PHYS               0x0f000000UL
-#define TLMM_SIZE               0x100000UL
+#define TLMM_PHYS               0x0f100000UL  /* measured: the window at 0x0f000000 reads but takes no write */
+#define TLMM_SIZE               0x40000UL
 #define GPIO_CFG(n)             (tlmm + gpio_base + gpio_stride * (n))      /* [1:0] pull, [5:2] function, [8:6] drive, [9] output */
 #define GPIO_IO(n)              (tlmm + gpio_base + gpio_stride * (n) + 4)  /* bit 0 in, bit 1 out */
 #define PULL_NONE               0
@@ -1699,7 +1699,19 @@ goodix_thread(__unused void *parameter, __unused wait_result_t result)
 
 	printf("goodix: mapping tlmm %#x, gcc %#x, se %#x, rsc %#x, cmd_db %#x\n", (uint64_t)TLMM_PHYS,
 	    (uint64_t)GCC_PHYS, (uint64_t)SE_PHYS, (uint64_t)RSC_PHYS, (uint64_t)CMD_DB_PHYS);
-	tlmm = ml_io_map(TLMM_PHYS, TLMM_SIZE);
+	/*
+	 * boot-arg touch_tlmm_size=<hex>: how much of the pin controller to map. The clock controller's window is mapped
+	 * 64 KiB at a time and writes to it stick; the pin controller's was mapped a whole megabyte, and none of its writes
+	 * stuck -- so this lets one run map it small and say whether the size is what is wrong.
+	 */
+	uint32_t tlmm_size = TLMM_SIZE;
+
+	if (PE_parse_boot_argn("touch_tlmm_size", &tlmm_size, sizeof(tlmm_size)) && tlmm_size >= 0x1000) {
+		printf("goodix: the pin controller is mapped %#x bytes\n", (uint64_t)tlmm_size);
+	} else {
+		tlmm_size = TLMM_SIZE;
+	}
+	tlmm = ml_io_map(TLMM_PHYS, tlmm_size);
 	printf("goodix: tlmm at %#x\n", (uint64_t)tlmm);
 	gcc = ml_io_map(GCC_PHYS, GCC_SIZE);
 	se = ml_io_map(SE_PHYS, SE_SIZE);
@@ -1734,6 +1746,31 @@ goodix_thread(__unused void *parameter, __unused wait_result_t result)
 			printf("goodix: probe: the clock controller at %#x says %#x (it answered)\n", (uint64_t)gcc_probe,
 			    (uint64_t)(*(volatile uint32_t *)((uintptr_t)gcc + gcc_probe)));
 		}
+		/*
+		 * touch_probe_phys=<hex>: a page elsewhere, first eight words read and then written with one value and read
+		 * again. The pin controller's window at 0x0f000000 reads but takes no write at any of its words, so where the
+		 * writable registers live is a question this answers.
+		 */
+		uint32_t phys = 0;
+		if (PE_parse_boot_argn("touch_probe_phys", &phys, sizeof(phys)) && phys != 0) {
+			vm_offset_t page = ml_io_map(phys & ~0xfffUL, 0x1000);
+
+			printf("goodix: probe: %#x maps at %llx:", (uint64_t)phys, (uint64_t)page);
+			for (unsigned i = 0; i < 8; i++) {
+				printf(" %#x", (uint64_t)rd(page + 4 * i));
+			}
+			printf("\n");
+			for (unsigned i = 0; i < 4; i++) {
+				uint32_t before = rd(page + 4 * i);
+
+				wr(page + 4 * i, before ^ 0x2c1);
+				printf("goodix: probe: word %u: %#x -> wrote %#x -> %#x\n", (uint64_t)i, (uint64_t)before,
+				    (uint64_t)(before ^ 0x2c1), (uint64_t)rd(page + 4 * i));
+				wr(page + 4 * i, before);
+			}
+			thread_terminate(current_thread());
+			return;
+		}
 		/* touch_probe_pin=<n>: the words of that pin's block, to find where its configuration register really is */
 		uint32_t pin = 0xffffffff;
 		if (PE_parse_boot_argn("touch_probe_pin", &pin, sizeof(pin)) && pin < 214) {
@@ -1744,11 +1781,21 @@ goodix_thread(__unused void *parameter, __unused wait_result_t result)
 				printf(" %#x", (uint64_t)rd(at + 4 * i));
 			}
 			printf("\n");
-			uint32_t want = 0x2c1;
-			wr(at, want);
-			printf("goodix: probe: wrote %#x to the first word, it reads %#x\n", (uint64_t)want, (uint64_t)rd(at));
-			wr(at + 4, want);
-			printf("goodix: probe: wrote %#x to the second word, it reads %#x\n", (uint64_t)want, (uint64_t)rd(at + 4));
+			/*
+			 * Which word of a pin's block takes a write: each is written with the same value and read back, so that the
+			 * one holding the configuration is named by the hardware rather than guessed from another SoC's layout.
+			 */
+			for (unsigned i = 0; i < 8; i++) {
+				uint32_t before = rd(at + 4 * i);
+
+				if (before == 0 || i >= 4) {
+					wr(at + 4 * i, 0x2c1);
+					printf("goodix: probe: word %u: %#x -> %#x\n", (uint64_t)i, (uint64_t)before,
+					    (uint64_t)rd(at + 4 * i));
+				} else {
+					printf("goodix: probe: word %u: %#x (left alone)\n", (uint64_t)i, (uint64_t)before);
+				}
+			}
 			thread_terminate(current_thread());
 			return;
 		}
