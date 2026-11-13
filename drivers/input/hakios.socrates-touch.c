@@ -883,6 +883,8 @@ touch_reset(void)
 }
 
 /* Is the chip there and running its firmware? Finds where it keeps the touch report. */
+static void config_probe(uint32_t config_address);
+
 static bool
 goodix_probe(bool verbose)
 {
@@ -936,6 +938,14 @@ goodix_probe(bool verbose)
 		}
 	}
 	printf("goodix: touch report at %#x, coordinates up to %u x %u\n", touch_address, max_x, max_y);
+	{
+		uint32_t want = 0;
+
+		if (PE_parse_boot_argn("touch_cfgread", &want, sizeof(want)) && want) {
+			/* the address the chip's description gives for its configuration: the second of the four it lists */
+			config_probe(le32(info + offset + 12));
+		}
+	}
 	/*
 	 * touch_icdump=1: the words of the description the addresses come from, so that the configuration identity the
 	 * chip reports can be compared with the one Android's driver prints (config id 0x640fdf7d). A chip whose
@@ -2048,6 +2058,39 @@ goodix_thread(__unused void *parameter, __unused wait_result_t result)
 		}
 		sleep_yielding(poll_us);
 	}
+}
+
+/*
+ * Reading the configuration the way the chip's own driver does (brl_read_config): the two-byte command 0x0704 into the
+ * command area, then 64 bytes at the configuration address. The first four of those bytes are the configuration's
+ * identity, which Android's driver prints as 0x640fdf7d for this panel -- a chip without it does not report touches.
+ */
+static void
+config_probe(uint32_t config_address)
+{
+	uint8_t buffer[16], answer[16], config[64];
+
+	memset(buffer, 0, sizeof(buffer));
+	buffer[2] = 4;
+	buffer[3] = 0x07;
+	buffer[4] = 0x04;
+	uint32_t sum = buffer[2] + buffer[3] + buffer[4];
+	buffer[5] = (uint8_t)sum;
+	buffer[6] = (uint8_t)(sum >> 8);
+	if (!goodix_write(command_address, buffer, sizeof(buffer)) ||
+	    !goodix_read(command_address, answer, sizeof(answer))) {
+		printf("goodix: config: the command did not go through\n");
+		return;
+	}
+	printf("goodix: config: command 0x0704 answered %02x %02x\n", answer[0], answer[1]);
+	sleep_ms(2);
+	if (!goodix_read(config_address, config, sizeof(config))) {
+		printf("goodix: config: %#x cannot be read\n", (uint64_t)config_address);
+		return;
+	}
+	printf("goodix: config at %#x: %02x %02x %02x %02x | %02x %02x %02x %02x %02x %02x %02x %02x\n",
+	    (uint64_t)config_address, config[0], config[1], config[2], config[3], config[4], config[5], config[6],
+	    config[7], config[8], config[9], config[10], config[11]);
 }
 
 void
