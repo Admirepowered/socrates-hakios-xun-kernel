@@ -71,6 +71,9 @@ static vm_offset_t gpio_stride = 0x1000;
 static vm_offset_t gpio_base = 0;
 
 static uint32_t touch_stage = 9;   /* boot-arg touch_stage=: how far the bring-up goes */
+static uint32_t dbg;       /* boot-arg touch_dbg=1: the raw bytes of a report every so many polls, and the
+                            * interrupt line with them, so that a chip which finds no finger can be told apart
+                            * from one whose reports are not being read */
 static uint32_t slow;      /* boot-arg touch_slow=1: three seconds before each step of the bring-up, so that what
                             * the phone is doing can be read off its own screen while it is doing it (a read the
                             * controller does not answer stops it with no log at all) */
@@ -1015,6 +1018,14 @@ goodix_poll(void)
 	uint32_t count;
 
 	seen.polls++;
+	if (dbg && (seen.polls % 500) == 0) {
+		static uint8_t raw[8];
+		bool ok = goodix_read(touch_address, raw, sizeof(raw));
+
+		printf("goodix: dbg: poll %u: read %s, %02x %02x %02x %02x %02x %02x %02x %02x, interrupt %s\n",
+		    seen.polls, ok ? "ok" : "FAILED", raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
+		    gpio_get(PIN_INT) ? "high" : "low");
+	}
 	if (!goodix_read(touch_address, report, first) || report[0] == 0) {
 		return;
 	}
@@ -1683,6 +1694,7 @@ goodix_thread(__unused void *parameter, __unused wait_result_t result)
 	PE_parse_boot_argn("touch_no_gpio", &no_gpio, sizeof(no_gpio));
 	PE_parse_boot_argn("touch_no_power", &no_power, sizeof(no_power));
 	PE_parse_boot_argn("touch_slow", &slow, sizeof(slow));
+	PE_parse_boot_argn("touch_dbg", &dbg, sizeof(dbg));
 	timer_hz = __builtin_arm_rsr64("CNTFRQ_EL0");
 	if (timer_hz < 1000000ULL || timer_hz > 100000000ULL) {
 		timer_hz = 19200000ULL;         /* what the boot loader read out of the counter's own frequency register */
