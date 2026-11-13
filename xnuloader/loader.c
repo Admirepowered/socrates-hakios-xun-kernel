@@ -2817,6 +2817,7 @@ static struct {
 } SCREEN;
 static uint64_t win_base, win_size; /* XNU's physical memory window, claimed once */
 static uint64_t resident_rd_size;   /* root image kept at win_base + RESIDENT_RD_OFFSET, 0 if none */
+static uint64_t resident_rd_pa;     /* where it actually went, for "oem imgsum" */
 static char last_result[64] = "idle";
 
 static void
@@ -3058,6 +3059,8 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	}
 	if (resident_rd_size != 0) {
 		uint64_t res_pa = phys_base + RESIDENT_RD_OFFSET;
+
+		resident_rd_pa = res_pa;
 		uint64_t res_size = (resident_rd_size + PAGE_SIZE_MAX - 1) & ~(PAGE_SIZE_MAX - 1);
 
 		if (kern_hi + rd_size > res_pa) {
@@ -4048,6 +4051,7 @@ fb_command(char *cmd)
 				}
 				if (to_ramdisk) {
 					resident_rd_size = total;
+					resident_rd_pa = (uint64_t)(uintptr_t)dest;
 				}
 				fb_reply("OKAY", "");
 			} else {
@@ -4064,6 +4068,30 @@ fb_command(char *cmd)
 				sent += chunk;
 			}
 			fb_reply("OKAY", "");
+		} else if (starts_with(cmd, "oem imgsum")) {
+			/*
+			 * A checksum of the resident image as it now sits in this machine's memory, word by word: the host sends
+			 * the same number for the file, and the two agreeing means the transfer carried it whole. The report
+			 * buffer of the touch screen aside, this is what the boot's file system comes out of.
+			 */
+			if (resident_rd_size == 0 || resident_rd_pa == 0) {
+				fb_reply("FAIL", "no resident image");
+			} else {
+				const uint64_t *w = (const uint64_t *)(uintptr_t)resident_rd_pa;
+				uint64_t h = 0xcbf29ce484222325ULL;
+				uint64_t n = resident_rd_size / 8;
+				uint64_t i;
+
+				for (i = 0; i < n; i++) {
+					h = (h ^ w[i]) * 0x100000001b3ULL;
+				}
+				for (i = n * 8; i < resident_rd_size; i++) {
+					h = (h ^ ((const uint8_t *)(uintptr_t)resident_rd_pa)[i]) * 0x100000001b3ULL;
+				}
+				/* the reply carries no room for a number: the log has it, and `oem log` fetches that */
+				print("imgsum: %llx of %llx bytes\n", h, (unsigned long long)resident_rd_size);
+				fb_reply("OKAY", "");
+			}
 		} else if (starts_with(cmd, "oem screenshot")) {
 			/* stage the raw framebuffer; "getvar screen" gives its geometry */
 			if (SCREEN.base == 0) {
