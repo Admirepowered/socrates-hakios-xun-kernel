@@ -2068,6 +2068,33 @@ goodix_thread(__unused void *parameter, __unused wait_result_t result)
 static void
 config_probe(uint32_t config_address)
 {
+	/*
+	 * Also a sweep: sixty-four bytes at each address the chip's description gives, looking for the configuration's
+	 * identity (0x640fdf7d, which the configuration file this phone ships carries) -- the section it lives in is then
+	 * known rather than inferred.
+	 */
+	{
+		static const uint32_t places[] = { 0x10174, 0x10218, 0x10400, 0x10308, 0x10000, 0x10680 };
+
+		for (unsigned i = 0; i < sizeof(places) / sizeof(places[0]); i++) {
+			uint8_t page[64];
+			bool found = false;
+
+			if (!goodix_read(places[i], page, sizeof(page))) {
+				printf("goodix: sweep: %#x cannot be read\n", (uint64_t)places[i]);
+				continue;
+			}
+			for (unsigned k = 0; k + 3 < sizeof(page); k++) {
+				if (page[k] == 0x7d && page[k + 1] == 0xdf && page[k + 2] == 0x0f && page[k + 3] == 0x64) {
+					found = true;
+				}
+			}
+			printf("goodix: sweep: %#x: %02x %02x %02x %02x %02x %02x %02x %02x %s\n", (uint64_t)places[i],
+			    page[0], page[1], page[2], page[3], page[4], page[5], page[6], page[7],
+			    found ? "<-- CONFIG ID HERE" : "");
+		}
+	}
+
 	uint8_t buffer[16], answer[16], config[64];
 
 	memset(buffer, 0, sizeof(buffer));
