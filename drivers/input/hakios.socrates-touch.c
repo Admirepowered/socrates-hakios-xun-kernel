@@ -71,6 +71,9 @@ static vm_offset_t gpio_stride = 0x1000;
 static vm_offset_t gpio_base = 0;
 
 static uint32_t touch_stage = 9;   /* boot-arg touch_stage=: how far the bring-up goes */
+static uint32_t intdump;   /* boot-arg touch_intdump=1: read the report buffer while the interrupt line is low */
+static uint32_t intdump_seen;
+static uint32_t arm;       /* boot-arg touch_arm=1: clear the report address before every read */
 static uint32_t big;       /* boot-arg touch_bigread=1: read the whole 2500-byte report buffer every poll */
 static uint32_t dbg;       /* boot-arg touch_dbg=1: the raw bytes of a report every so many polls, and the
                             * interrupt line with them, so that a chip which finds no finger can be told apart
@@ -1037,6 +1040,29 @@ goodix_poll(void)
 	 * touch_bigread=1: the whole buffer, the way the chip's own driver reads it -- the head of it is the report, and
 	 * reading all of it is what leaves the buffer empty for the next frame.
 	 */
+	/*
+	 * touch_arm=1: one zero byte written to the report address before every read. The chip's own driver writes exactly
+	 * that to the same address after taking a report (brl_after_event_handler), so a buffer that is never cleared may
+	 * be the reason it never fills again.
+	 */
+	/*
+	 * touch_intdump=1: a read taken the moment the interrupt line is low, and what it says -- up to forty times, so a
+	 * chip that only fills its buffer while it is asserting can be told from one that never fills it at all.
+	 */
+	if (intdump && !gpio_get(PIN_INT) && intdump_seen < 40) {
+		uint8_t now[8];
+
+		if (goodix_read(touch_address, now, sizeof(now))) {
+			intdump_seen++;
+			printf("goodix: int: %02x %02x %02x %02x %02x %02x %02x %02x\n", now[0], now[1], now[2], now[3],
+			    now[4], now[5], now[6], now[7]);
+		}
+	}
+	if (arm) {
+		uint8_t zero = 0;
+
+		goodix_write(touch_address, &zero, 1);
+	}
 	if (big) {
 		static uint8_t whole[GOODIX_REPORT_READ];
 
@@ -1759,6 +1785,8 @@ goodix_thread(__unused void *parameter, __unused wait_result_t result)
 	PE_parse_boot_argn("touch_slow", &slow, sizeof(slow));
 	PE_parse_boot_argn("touch_dbg", &dbg, sizeof(dbg));
 	PE_parse_boot_argn("touch_bigread", &big, sizeof(big));
+	PE_parse_boot_argn("touch_arm", &arm, sizeof(arm));
+	PE_parse_boot_argn("touch_intdump", &intdump, sizeof(intdump));
 	PE_parse_boot_argn("touch_paint", &paint, sizeof(paint));
 	timer_hz = __builtin_arm_rsr64("CNTFRQ_EL0");
 	if (timer_hz < 1000000ULL || timer_hz > 100000000ULL) {
