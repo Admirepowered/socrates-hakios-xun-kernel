@@ -1082,6 +1082,19 @@ goodix_probe(bool verbose)
 	}
 	printf("goodix: touch report at %#x, coordinates up to %u x %u\n", touch_address, max_x, max_y);
 	{
+		/*
+		 * boot-arg touch_addr=<hex>: which address the reports are read from. The word the driver takes for it (the
+		 * upper half of the chip description's sixth pair) is the one brl_send_cmd writes commands to; the description
+		 * holds more addresses, and the report may be at one of them.
+		 */
+		uint32_t want = 0;
+
+		if (PE_parse_boot_argn("touch_addr", &want, sizeof(want)) && want != 0) {
+			touch_address = want;
+			printf("goodix: reports are read from %#x instead\n", (uint64_t)touch_address);
+		}
+	}
+	{
 		uint32_t want = 0;
 
 		if (PE_parse_boot_argn("touch_cfgread", &want, sizeof(want)) && want) {
