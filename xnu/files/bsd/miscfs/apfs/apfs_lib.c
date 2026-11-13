@@ -2432,6 +2432,8 @@ apfs_read_stream(struct apfs_vol *vol, uint64_t stream_id, uint64_t stream_size,
 	int error;
 
 	*out = 0;
+	apfs_log("stream %llu: enters for %zu at %llu of %llu\n", (unsigned long long)stream_id,
+	    len, (unsigned long long)off, (unsigned long long)stream_size);
 	if (off >= stream_size) {
 		return 0;
 	}
@@ -2444,6 +2446,9 @@ apfs_read_stream(struct apfs_vol *vol, uint64_t stream_id, uint64_t stream_size,
 
 	error = ext_begin(vol, stream_id, off, &it);
 	if (error) {
+		apfs_log("stream %llu: ext_begin at %llu of %llu: %d\n",
+		    (unsigned long long)stream_id, (unsigned long long)off,
+		    (unsigned long long)stream_size, error);
 		return error;
 	}
 	for (;;) {
@@ -2454,6 +2459,9 @@ apfs_read_stream(struct apfs_vol *vol, uint64_t stream_id, uint64_t stream_size,
 			break;
 		}
 		if (error) {
+			apfs_log("stream %llu: ext_next: %d (after %llu bytes of %llu, asked %llu at %llu)\n",
+			    (unsigned long long)stream_id, error, (unsigned long long)(dst - (uint8_t *)buf),
+			    (unsigned long long)stream_size, (unsigned long long)len, (unsigned long long)off);
 			return error;
 		}
 		if (length == 0 || (length % bs) != 0) {
@@ -2498,6 +2506,10 @@ apfs_read_stream(struct apfs_vol *vol, uint64_t stream_id, uint64_t stream_size,
 				/* file data has no object header and so no checksum */
 				error = nx_block(vol->nx, addr, &blk, false);
 				if (error) {
+					apfs_log("stream %llu: block %llu of a %llu-byte stream: %d (volume %llu blocks)\n",
+					    (unsigned long long)stream_id, (unsigned long long)addr,
+					    (unsigned long long)stream_size, error,
+					    (unsigned long long)vol->nx->block_count);
 					return error;
 				}
 				memcpy(dst + (from - off), blk + skew, (size_t)n);
