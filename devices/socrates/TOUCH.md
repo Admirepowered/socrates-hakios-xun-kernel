@@ -37,6 +37,33 @@ Everything below came from the phone, not from a document.
 - ftrace/kprobes on Android to capture the driver's own reads — **kprobes do not fire at all on this kernel** (a probe on `vfs_read` also yields nothing).
 - Android's `read_cfg` sysfs node — the callback it needs is not registered (`EINVAL`).
 
+## The boot, as far as it got, and what each experiment settled
+
+The touch screen cannot be judged on a phone whose userland never starts, so a good part of the work went into the
+boot. What was established, in the order it was:
+
+- **The image is not the problem.** `oem imgsum` in the loader (a 64-bit FNV over the staged resident image, rolled over
+  eight bytes at a time) answers `68ded9e137bce937 of 93aa5000 bytes` on the phone and the same number comes out of
+  `userland/system.apfs` on the host. The 2.47 GB arrive over USB byte for byte.
+- **The file system image is not the problem either.** With the kernel's APFS checksum the algorithm is Apple's
+  complement-form fletcher-64 over the block after its own checksum field; written that way, blocks 0, 1 and 2632 all
+  agree and the first three thousand blocks check out on the host. A kernel that logs a disagreement and carries on
+  boots no further, so that warning was a red herring.
+- **The compressed `/sbin` was not the problem.** Rebuilding the image with `mkapfs --plain sbin` makes `/sbin/launchd`
+  a plain 34560-byte ARM64 Mach-O (`0xfeedfacf`, `MH_EXECUTE`, every segment in bounds, `LC_CODE_SIGNATURE` ending
+  exactly at the file's end) — and the kernel still answers errno 8 when it tries to exec it.
+- **The kernel tree was not the problem.** Rebuilding a clean tree with `xnu/apply.sh` (Apple's release, `hakios.patch`,
+  `files/`, and `drivers/` by `drivers/map`) and building it from scratch gives the same errno 8.
+
+`nsx: unexpected SIGKILL of init` with `namespace 9 code 0x1` is `OS_REASON_EXEC` / `EXEC_EXIT_REASON_BAD_MACHO`, which is
+what the exec returned; both faces of the same failure.
+
+What is left unproven is whether a userland starts at all on this phone at present. Note for whoever picks this up: the
+system image is only built when `userland/big` exists, and `build.sh` fills that directory from the programs and
+libraries over 4 MB that the optional Turnip and Metal builds put in `root/lib` and `root/bin`. Without those builds, a
+`./build.sh` run quietly skips the system image and leaves the previous one in place — which is why a "rebuilt" image can
+turn out to be the old one.
+
 ## What the chip's memory holds, address by address
 
 Read together, at every poll, so that each region's job is known rather than assumed:
