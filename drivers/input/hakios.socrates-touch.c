@@ -176,15 +176,20 @@ gpio_output(unsigned pin, bool high, unsigned pull, unsigned ma)
 #define TCS_IRQ_ENABLE          0x00
 #define TCS_IRQ_STATUS          0x04
 #define TCS_IRQ_CLEAR           0x08
-#define TCS_WAIT_FOR_COMPLETION 0x10
-#define TCS_CONTROL             0x14
+/*
+ * The slot set's registers, in the hardware revision 3.0 layout that this phone reports (its DRV id reads as 0x30000).
+ * The reference phone's controller is an older revision, which puts these at 0x10..0x38 with 20 bytes per command; here
+ * they are at 0x20..0x3c with 24, and writing the old addresses leaves every one of them reading back as something else.
+ */
+#define TCS_WAIT_FOR_COMPLETION 0x20            /* one bit per command: wait for this one to finish */
+#define TCS_CONTROL             0x24
 #define TCS_CONTROL_ENABLE      (1u << 16)
 #define TCS_CONTROL_TRIGGER     (1u << 24)
-#define TCS_STATUS              0x18            /* 0 while busy */
-#define TCS_CMD_ENABLE          0x1c
-#define TCS_CMD_MSGID(n)        (0x30 + 20 * (n))
-#define TCS_CMD_ADDR(n)         (0x34 + 20 * (n))
-#define TCS_CMD_DATA(n)         (0x38 + 20 * (n))
+#define TCS_STATUS              0x28            /* zero while the set is busy */
+#define TCS_CMD_ENABLE          0x2c
+#define TCS_CMD_MSGID(n)        (0x34 + 24 * (n))
+#define TCS_CMD_ADDR(n)         (0x38 + 24 * (n))
+#define TCS_CMD_DATA(n)         (0x3c + 24 * (n))
 #define MSGID_WRITE_4_BYTES     0x10008
 #define MSGID_RESPONSE          0x100
 
@@ -346,10 +351,10 @@ io_supply_on(void)
 	printf("goodix: RPMh: ldob12 is at %#x; slot status %#x, control %#x, irq enable %#x status %#x\n", base,
 	    rd(TCS(TCS_STATUS)), rd(TCS(TCS_CONTROL)), rd(TCS(TCS_IRQ_ENABLE)), rd(TCS(TCS_IRQ_STATUS)));
 	/* the driver's own header says where its command slot sets are, which is what the data sheet calls the truth here */
-	printf("goodix: RPMh: drv id %#x, status %#x, control %#x, tcs at %#x (%#x), cmd tcs at %#x (%#x), cfg %#x, wake %#x\n",
-	    rd(rsc + 0x00), rd(rsc + 0x08), rd(rsc + 0x04), (uint64_t)(rd(rsc + 0x0c) & 0xffff),
-	    (uint64_t)(rd(rsc + 0x0c) >> 16), (uint64_t)(rd(rsc + 0x10) & 0xffff), (uint64_t)(rd(rsc + 0x10) >> 16),
-	    rd(rsc + 0x14), rd(rsc + 0x18));
+	printf("goodix: RPMh: drv id %#x, control %#x, cfg %#x; the four slot sets: status %#x %#x %#x %#x\n",
+	    rd(rsc + 0x00), rd(rsc + 0x04), rd(rsc + 0x0c),
+	    (uint64_t)rd(rsc + 0xd00 + 0x18), (uint64_t)rd(rsc + 0xd00 + 0x2a0 + 0x18),
+	    (uint64_t)rd(rsc + 0xd00 + 0x540 + 0x18), (uint64_t)rd(rsc + 0xd00 + 0x7e0 + 0x18));
 	if (!rpmh_write(address, data, 3)) {
 		return false;
 	}
