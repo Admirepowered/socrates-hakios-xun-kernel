@@ -37,6 +37,30 @@ Everything below came from the phone, not from a document.
 - ftrace/kprobes on Android to capture the driver's own reads — **kprobes do not fire at all on this kernel** (a probe on `vfs_read` also yields nothing).
 - Android's `read_cfg` sysfs node — the callback it needs is not registered (`EINVAL`).
 
+## What the chip's memory holds, address by address
+
+Read together, at every poll, so that each region's job is known rather than assumed:
+
+| Address | What it is |
+|---|---|
+| `0x10174` | the command area — a frame written here is acknowledged with `0x80` |
+| `0x10308` | the report buffer — it holds `00 00 14 00 31 00 00 0d` and never changes |
+| `0x10400` | a frame counter, `80 11 00 e8`, `80 22 00 e8`, `80 33 00 e8` — one step per frame, so the chip is scanning |
+| `0x13588`, `0x14280` | live 16-bit sample arrays that change with the panel and with a finger |
+| `0x10218` | a small number (`0x27`–`0x29`) and zeros; writing the configuration here stops the frame counter |
+
+The interrupt line is **asserted high**: the pin is configured with a pull-down (as Android's own table has it:
+`gpio25 : in low func0 2mA pull down`), so a high level is the chip asking, not an idle line. `touch_int_high=1` reads it
+that way.
+
+## Getting a userland to start
+
+`/sbin/launchd` in the image is decmpfs **type 4** (zlib in the resource fork) and this kernel registers only **type 1**, so
+`exec` answers ENOEXEC and the boot panics at the first process. `userland/build.sh` now builds the system image with
+`mkapfs --plain sbin`, which stores `/sbin` uncompressed — the image grows by a few tens of kilobytes and the binaries
+become readable. That matters for the touch as well: with no userland there is no display driver running, and the panel is
+a still image, which some touch controllers will not report over.
+
 ## The one open question
 
 The report area at `0x10308` holds a structured record — `00 00 14 00 | 31 00 00 0d | 52 0d 4e 01 | 00 00 65 01` repeated, where `0x0d52` (3410) and `0x014e` (334) look like coordinates in the 14400 × 32000 space — but its first byte never has bit 7 set, which is what the chip's own handler tests for a touch (`if ((byte0 & 0x80) == 0)` → no touch; bit 6 with the event in byte 2 is a chip request).
