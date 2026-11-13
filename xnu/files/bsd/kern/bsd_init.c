@@ -1105,10 +1105,17 @@ bsdinit_task(void)
 		 * this waits here instead, letting the rest of the machine run. The loader still takes the kernel back at its
 		 * own deadline, which runs from the timer's interrupt.
 		 */
-		printf("bsd_init: no_init is set: the first user process is not started; waiting here\n");
-		for (;;) {
-			thread_yield_to_preemption();
-		}
+		/*
+		 * Waiting here, and never woken: the first process has to stay alive (its exit is itself a panic) and this
+		 * thread is that process, so it blocks for good. A spin, even one that yields, was not enough -- the phone
+		 * reset under it about half a minute in.
+		 */
+		printf("bsd_init: no_init is set: the first user process is not started; this thread stops here\n");
+		static int never;
+
+		assert_wait((event_t)&never, THREAD_UNINT);
+		thread_block(THREAD_CONTINUE_NULL);
+		printf("bsd_init: no_init: woken, which should not happen\n");
 	} else {
 		load_init_program(p);
 	}
