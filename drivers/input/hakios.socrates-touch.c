@@ -207,6 +207,7 @@ static vm_offset_t gpio_stride = 0x1000;
 static vm_offset_t gpio_base = 0;
 
 static uint32_t touch_stage = 9;   /* boot-arg touch_stage=: how far the bring-up goes */
+static uint32_t ack_after;  /* boot-arg touch_ack=1: acknowledge every report that was read */
 static uint32_t intdump;   /* boot-arg touch_intdump=1: read the report buffer while the interrupt line is low */
 static uint32_t intdump_seen;
 static uint32_t arm;       /* boot-arg touch_arm=1: clear the report address before every read */
@@ -1254,6 +1255,24 @@ goodix_poll(void)
 	 * touch_intdump=1: a read taken the moment the interrupt line is low, and what it says -- up to forty times, so a
 	 * chip that only fills its buffer while it is asserting can be told from one that never fills it at all.
 	 */
+	/*
+	 * touch_ack=1: one zero byte written to the report address after every read, which is what the chip's own driver
+	 * does once it has taken a report (brl_after_event_handler). Writing it before the read -- what touch_arm does --
+	 * clears the report instead of acknowledging it.
+	 */
+	if (ack_after) {
+		static unsigned acked;
+
+		if (report[0] != 0) {
+			uint8_t zero = 0;
+
+			goodix_write(touch_address, &zero, 1);
+			if (acked++ < 20) {
+				printf("goodix: ack: the report %02x %02x %02x %02x %02x %02x %02x %02x was acknowledged\n",
+				    report[0], report[1], report[2], report[3], report[4], report[5], report[6], report[7]);
+			}
+		}
+	}
 	if (intdump && !gpio_get(PIN_INT) && intdump_seen < 20) {
 		/*
 		 * Both fields of the chip's description, read the way its own driver reads them: twenty-six bytes at the
@@ -2000,6 +2019,7 @@ goodix_thread(__unused void *parameter, __unused wait_result_t result)
 	PE_parse_boot_argn("touch_bigread", &big, sizeof(big));
 	PE_parse_boot_argn("touch_arm", &arm, sizeof(arm));
 	PE_parse_boot_argn("touch_intdump", &intdump, sizeof(intdump));
+	PE_parse_boot_argn("touch_ack", &ack_after, sizeof(ack_after));
 	PE_parse_boot_argn("touch_paint", &paint, sizeof(paint));
 	timer_hz = __builtin_arm_rsr64("CNTFRQ_EL0");
 	if (timer_hz < 1000000ULL || timer_hz > 100000000ULL) {
