@@ -65,8 +65,15 @@ static vm_offset_t tlmm, gcc, se, rsc, cmd_db;
  * say 0x1000, which on this phone walks off the block the controller answers in (a read there stops the phone);
  * 214 pins fit in the 32 KiB it does answer, at 0x80 each, which is what this port starts from. */
 static vm_offset_t gpio_stride = 0x80;
+/* boot-arg touch_pin_base=<hex>: where pin 0's registers start inside the window. Measured on this phone: the
+ * window answers from 0x1000 to about 0x9000 and nowhere else, and 214 pins at 0x80 each fill 0x1000..0x7b00 of it
+ * exactly — which is also where pin 24 (the reset line) and pins 44-47 (the bus) answer. */
+static vm_offset_t gpio_base = 0x1000;
 
 static uint32_t touch_stage = 9;   /* boot-arg touch_stage=: how far the bring-up goes */
+static uint32_t slow;      /* boot-arg touch_slow=1: three seconds before each step of the bring-up, so that what
+                            * the phone is doing can be read off its own screen while it is doing it (a read the
+                            * controller does not answer stops it with no log at all) */
 static uint32_t no_power;  /* boot-arg touch_no_power=1: read the pins but write none of them */
 static uint32_t no_gpio;   /* boot-arg touch_no_gpio=1: touch no pin at all (the one experiment that says whether a
                             * read or write of the pin controller is what stops this phone) */
@@ -84,24 +91,45 @@ wr(vm_offset_t address, uint32_t value)
 	*(volatile uint32_t *)address = value;
 }
 
+/*
+ * The delays count the generic timer's counter directly, in the kernel and without the clock subsystem: delay_for_interval()
+ * spins for short intervals but blocks the thread for long ones and waits to be woken by the timer, and on this port that
+ * wakeup does not always come (the reset's 100 ms pause stopped the bring-up dead, twice in a row at different points).
+ * CNTFRQ is 19.2 MHz on this SoC, and reading the counter costs a register read.
+ */
+static uint64_t timer_hz;
+
+static inline uint64_t
+timer_now(void)
+{
+	return __builtin_arm_rsr64("CNTPCT_EL0");
+}
+
 static void
 sleep_us(uint32_t us)
 {
-	delay_for_interval(us, NSEC_PER_USEC);
+	uint64_t hz = timer_hz ? timer_hz : 19200000ULL;
+	uint64_t ticks = (hz / 1000000ULL + 1) * (uint64_t)us;
+	uint64_t from = timer_now();
+
+	while (timer_now() - from < ticks) {
+	}
 }
 
 static void
 sleep_ms(uint32_t ms)
 {
-	delay_for_interval(ms, NSEC_PER_MSEC);
+	while (ms-- > 0) {
+		sleep_us(1000);
+	}
 }
 
 /* ---- pins (TLMM) ------------------------------------------------------------------------------- */
 
 #define TLMM_PHYS               0x0f000000UL
 #define TLMM_SIZE               0x100000UL
-#define GPIO_CFG(n)             (tlmm + gpio_stride * (n))      /* [1:0] pull, [5:2] function, [8:6] drive, [9] output */
-#define GPIO_IO(n)              (tlmm + gpio_stride * (n) + 4)  /* bit 0 in, bit 1 out */
+#define GPIO_CFG(n)             (tlmm + gpio_base + gpio_stride * (n))      /* [1:0] pull, [5:2] function, [8:6] drive, [9] output */
+#define GPIO_IO(n)              (tlmm + gpio_base + gpio_stride * (n) + 4)  /* bit 0 in, bit 1 out */
 #define PULL_NONE               0
 #define PULL_UP                 3
 
@@ -235,13 +263,18 @@ rpmh_write(const uint32_t *address, const uint32_t *data, unsigned count)
 	lck_mtx_lock(&hakios_rsc_lock);
 	irq_enable = rd(TCS(TCS_IRQ_ENABLE));
 	/* the slot set must be idle, and switched off the way the hardware wants it: trigger, then enable */
-	for (int i = 0; rd(TCS(TCS_STATUS)) == 0; i++) {
-		if (i > 2000) {
-			printf("goodix: RPMh: the command slots stay busy\n");
-			lck_mtx_unlock(&hakios_rsc_lock);
-			return false;
-		}
+	/*
+	 * The slot set is asked to be idle first, but this controller reads its status as 0 whether the slots are free or not,
+	 * so a wait on that bit only ever times out: the write goes ahead either way and the completion is what decides.
+	 */
+	uint32_t idle = rd(TCS(TCS_STATUS));
+
+	for (int i = 0; idle == 0 && i < 50; i++) {
 		sleep_us(100);
+		idle = rd(TCS(TCS_STATUS));
+	}
+	if (idle == 0) {
+		printf("goodix: RPMh: the slot status stays 0; going ahead\n");
 	}
 	wr(TCS(TCS_CONTROL), rd(TCS(TCS_CONTROL)) & ~TCS_CONTROL_TRIGGER);
 	wr(TCS(TCS_CONTROL), rd(TCS(TCS_CONTROL)) & ~TCS_CONTROL_ENABLE);
@@ -274,6 +307,15 @@ rpmh_write(const uint32_t *address, const uint32_t *data, unsigned count)
  */
 static uint32_t rail_mv = 1800, rail_mode = 4;   /* boot-args touch_vdd_mv=, touch_rail_mode= (this PMIC's HPM is 4) */
 
+static void
+step(const char *what)
+{
+	printf("goodix: -- %s\n", what);
+	if (slow) {
+		delay_for_interval(3000, NSEC_PER_MSEC);
+	}
+}
+
 static bool
 io_supply_on(void)
 {
@@ -300,6 +342,11 @@ io_supply_on(void)
 	}
 	printf("goodix: RPMh: ldob12 is at %#x; slot status %#x, control %#x, irq enable %#x status %#x\n", base,
 	    rd(TCS(TCS_STATUS)), rd(TCS(TCS_CONTROL)), rd(TCS(TCS_IRQ_ENABLE)), rd(TCS(TCS_IRQ_STATUS)));
+	/* the driver's own header says where its command slot sets are, which is what the data sheet calls the truth here */
+	printf("goodix: RPMh: drv id %#x, status %#x, control %#x, tcs at %#x (%#x), cmd tcs at %#x (%#x), cfg %#x, wake %#x\n",
+	    rd(rsc + 0x00), rd(rsc + 0x08), rd(rsc + 0x04), (uint64_t)(rd(rsc + 0x0c) & 0xffff),
+	    (uint64_t)(rd(rsc + 0x0c) >> 16), (uint64_t)(rd(rsc + 0x10) & 0xffff), (uint64_t)(rd(rsc + 0x10) >> 16),
+	    rd(rsc + 0x14), rd(rsc + 0x18));
 	if (!rpmh_write(address, data, 3)) {
 		return false;
 	}
@@ -760,10 +807,15 @@ le32(const uint8_t *p)
 static void
 touch_reset(void)
 {
+	printf("goodix: reset: driving the line low (write %#lx)\n", (unsigned long)GPIO_IO(PIN_RESET));
 	gpio_set(PIN_RESET, false);
+	printf("goodix: reset: low written\n");
 	sleep_ms(2);
+	printf("goodix: reset: the short pause is over, driving the line high\n");
 	gpio_set(PIN_RESET, true);
+	printf("goodix: reset: high written\n");
 	sleep_ms(100);
+	printf("goodix: reset: done\n");
 }
 
 /* Is the chip there and running its firmware? Finds where it keeps the touch report. */
@@ -962,7 +1014,8 @@ goodix_poll(void)
 	if (report[0] & GOODIX_STATUS_REQUEST) {
 		if ((report[2] & 0xf) == GOODIX_REQUEST_RESET || report[2] == GOODIX_REQUEST_RESET) {
 			printf("goodix: the chip asks to be reset\n");
-			touch_reset();
+			step("resetting the chip");
+		touch_reset();
 		}
 		return;
 	}
@@ -1487,13 +1540,17 @@ bring_up(void)
 {
 	const char *problem = "its clocks cannot be turned on";
 
+	step("reading the pins as the firmware left them");
 	show_state("as found");
+	step("the pins have been read");
 	touch_chip = touch_chip_detect();
 	printf("goodix: selected %s\n", chip_name());
+	step("powering the chip (supplies and the reset line)");
 	if (!power_on()) {
 		printf("goodix: the I/O supply is not on; the chip is left alone\n");
 		return false;
 	}
+	step("the supplies are on");
 	if (touch_stage < 4) {
 		printf("goodix: stage %u stops after the supplies\n", touch_stage);
 		return false;
@@ -1516,6 +1573,7 @@ bring_up(void)
 		use_engine_pins();
 		spi_transfer = geni_transfer;
 		show_state("powered, on the serial engine");
+		step("reading the chip's firmware version");
 		if (chip_probe(true)) {
 			return true;
 		}
@@ -1533,6 +1591,7 @@ bring_up(void)
 	for (int attempt = 0; attempt < 2; attempt++) {
 		bitbang_in = attempt == 0 ? PIN_MISO : PIN_MOSI;
 		bitbang_out = attempt == 0 ? PIN_MOSI : PIN_MISO;
+		step("driving the four pins by hand");
 		bitbang_init();
 		printf("goodix: the pins are driven by hand (in gpio%u, out gpio%u); resetting the chip\n", bitbang_in,
 		    bitbang_out);
@@ -1601,13 +1660,25 @@ goodix_thread(__unused void *parameter, __unused wait_result_t result)
 	PE_parse_boot_argn("touch_no_rpmh", &no_rpmh, sizeof(no_rpmh));
 	PE_parse_boot_argn("touch_no_gpio", &no_gpio, sizeof(no_gpio));
 	PE_parse_boot_argn("touch_no_power", &no_power, sizeof(no_power));
+	PE_parse_boot_argn("touch_slow", &slow, sizeof(slow));
+	timer_hz = __builtin_arm_rsr64("CNTFRQ_EL0");
+	if (timer_hz < 1000000ULL || timer_hz > 100000000ULL) {
+		timer_hz = 19200000ULL;         /* what the boot loader read out of the counter's own frequency register */
+	}
+	printf("goodix: the timer counts at %lu Hz\n", (unsigned long)timer_hz);
 	{
 		uint32_t stride = 0x80;
 
 		if (PE_parse_boot_argn("touch_stride", &stride, sizeof(stride)) && stride >= 0x10 && stride <= 0x1000) {
 			gpio_stride = stride;
 		}
-		printf("goodix: the pins are %#lx bytes apart\n", (unsigned long)gpio_stride);
+		uint32_t base = 0x1000;
+
+		if (PE_parse_boot_argn("touch_pin_base", &base, sizeof(base))) {
+			gpio_base = base;
+		}
+		printf("goodix: the pins start at %#lx and are %#lx bytes apart\n", (unsigned long)gpio_base,
+		    (unsigned long)gpio_stride);
 	}
 	touch_stage = stage;
 	printf("goodix: stage %u\n", stage);
@@ -1645,6 +1716,13 @@ goodix_thread(__unused void *parameter, __unused wait_result_t result)
 		if (wcomb) {
 			tlmm = ml_io_map_wcomb(0x0f000000, 0x100000);
 			printf("goodix: probe: the window mapped write-combining at %llx\n", (uint64_t)tlmm);
+		}
+		/* touch_probe_gcc=<hex>: the same kind of read, but in the clock controller's window, which is a peripheral this
+		 * kernel is known to reach: if a far offset answers there, the mappings are not what limits the pin controller */
+		uint32_t gcc_probe = 0;
+		if (PE_parse_boot_argn("touch_probe_gcc", &gcc_probe, sizeof(gcc_probe))) {
+			printf("goodix: probe: the clock controller at %#x says %#x (it answered)\n", (uint64_t)gcc_probe,
+			    (uint64_t)(*(volatile uint32_t *)((uintptr_t)gcc + gcc_probe)));
 		}
 		printf("goodix: probe: reading the pin controller at offset %#x\n", (uint64_t)probe);
 		/* touch_probe_page=1: map only that page, rather than the 1 MB window the driver maps */
