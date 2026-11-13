@@ -289,6 +289,9 @@ rpmh_write(const uint32_t *address, const uint32_t *data, unsigned count)
 	wr(TCS(TCS_IRQ_ENABLE), irq_enable | 1);        /* the status bit follows the enable; the interrupt itself stays masked */
 	wr(TCS(TCS_CONTROL), TCS_CONTROL_ENABLE);
 	wr(TCS(TCS_CONTROL), TCS_CONTROL_ENABLE | TCS_CONTROL_TRIGGER);
+	printf("goodix: RPMh: after the trigger: control %#x, status %#x, cmd enable %#x, wait %#x, irq status %#x\n",
+	    rd(TCS(TCS_CONTROL)), rd(TCS(TCS_STATUS)), rd(TCS(TCS_CMD_ENABLE)), rd(TCS(TCS_WAIT_FOR_COMPLETION)),
+	    rd(TCS(TCS_IRQ_STATUS)));
 
 	done = rpmh_wait(TCS_IRQ_STATUS, 1, 1, "the request");
 	wr(TCS(TCS_CONTROL), rd(TCS(TCS_CONTROL)) & ~TCS_CONTROL_TRIGGER);
