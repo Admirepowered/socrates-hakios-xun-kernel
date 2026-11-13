@@ -727,7 +727,13 @@ node_at_h(struct apfs_btree *tree, uint64_t addr, uint64_t hash8, const uint8_t 
 	int error = nx_block(tree->nx, addr, blk, !noheader);
 
 	if (error) {
+		apfs_log("node_at_h %llu: nx_block: %d\n", (unsigned long long)addr, error);
 		return error;
+	}
+	if (addr == 2632) {
+		apfs_log("node_at_h 2632: obj type %#x, first bytes %02x %02x %02x %02x %02x %02x %02x %02x\n",
+		    (unsigned)obj_type(*blk), (*blk)[0], (*blk)[1], (*blk)[2], (*blk)[3],
+		    (*blk)[4], (*blk)[5], (*blk)[6], (*blk)[7]);
 	}
 	if (noheader) {
 		uint8_t h[8];
@@ -747,6 +753,8 @@ node_at_h(struct apfs_btree *tree, uint64_t addr, uint64_t hash8, const uint8_t 
 		}
 	} else if (obj_type(*blk) != APFS_OBJECT_TYPE_BTREE &&
 	    obj_type(*blk) != APFS_OBJECT_TYPE_BTREE_NODE) {
+		apfs_log("node_at_h %llu: not a B-tree node (type %#x)\n",
+		    (unsigned long long)addr, (unsigned)obj_type(*blk));
 		return EIO;
 	}
 	return node_parse(tree, *blk, n);
