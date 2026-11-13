@@ -313,7 +313,7 @@ rpmh_write(const uint32_t *address, const uint32_t *data, unsigned count)
  * The chip's I/O supply: 1.8 V from the RPMh regulator ldob12 (the phone's tree calls it "pm_humu_l12", Android's
  * regulator summary "spi0.0-vdd"). Nothing else is connected to it.
  */
-static uint32_t rail_mv = 1800, rail_mode = 4;   /* boot-args touch_vdd_mv=, touch_rail_mode= (this PMIC's HPM is 4) */
+static uint32_t rail_mv = 1800, rail_mode = 7;   /* boot-args touch_vdd_mv=, touch_rail_mode=: PMIC4 HPM is 7 (4 is retention) */
 
 static void
 step(const char *what)
@@ -337,8 +337,8 @@ io_supply_on(void)
 	if (rail_mv < 1200 || rail_mv > 2000) {
 		rail_mv = 1800;
 	}
-	if (rail_mode > 7) {
-		rail_mode = 4;
+	if (rail_mode > 7 || rail_mode == 0) {
+		rail_mode = 7;
 	}
 	uint32_t address[3] = { base + VRM_VOLTAGE, base + VRM_ENABLE, base + VRM_MODE };
 	uint32_t data[3] = { rail_mv, 1, rail_mode };
@@ -355,6 +355,8 @@ io_supply_on(void)
 	    rd(rsc + 0x00), rd(rsc + 0x04), rd(rsc + 0x0c),
 	    (uint64_t)rd(rsc + 0xd00 + 0x18), (uint64_t)rd(rsc + 0xd00 + 0x2a0 + 0x18),
 	    (uint64_t)rd(rsc + 0xd00 + 0x540 + 0x18), (uint64_t)rd(rsc + 0xd00 + 0x7e0 + 0x18));
+	printf("goodix: RPMh: sending %u mV, enable, mode %u to %#x\n", (uint64_t)rail_mv, (uint64_t)rail_mode,
+	    (uint64_t)base);
 	if (!rpmh_write(address, data, 3)) {
 		return false;
 	}
@@ -1731,6 +1733,24 @@ goodix_thread(__unused void *parameter, __unused wait_result_t result)
 		if (PE_parse_boot_argn("touch_probe_gcc", &gcc_probe, sizeof(gcc_probe))) {
 			printf("goodix: probe: the clock controller at %#x says %#x (it answered)\n", (uint64_t)gcc_probe,
 			    (uint64_t)(*(volatile uint32_t *)((uintptr_t)gcc + gcc_probe)));
+		}
+		/* touch_probe_pin=<n>: the words of that pin's block, to find where its configuration register really is */
+		uint32_t pin = 0xffffffff;
+		if (PE_parse_boot_argn("touch_probe_pin", &pin, sizeof(pin)) && pin < 214) {
+			vm_offset_t at = (uintptr_t)tlmm + gpio_base + gpio_stride * pin;
+
+			printf("goodix: probe: pin %u at %llx:", (uint64_t)pin, (uint64_t)at);
+			for (unsigned i = 0; i < 8; i++) {
+				printf(" %#x", (uint64_t)rd(at + 4 * i));
+			}
+			printf("\n");
+			uint32_t want = 0x2c1;
+			wr(at, want);
+			printf("goodix: probe: wrote %#x to the first word, it reads %#x\n", (uint64_t)want, (uint64_t)rd(at));
+			wr(at + 4, want);
+			printf("goodix: probe: wrote %#x to the second word, it reads %#x\n", (uint64_t)want, (uint64_t)rd(at + 4));
+			thread_terminate(current_thread());
+			return;
 		}
 		printf("goodix: probe: reading the pin controller at offset %#x\n", (uint64_t)probe);
 		/* touch_probe_page=1: map only that page, rather than the 1 MB window the driver maps */
