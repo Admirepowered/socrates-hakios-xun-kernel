@@ -108,6 +108,29 @@ inside `seek_to` is where they part. `omap_find`, which `seek_to` reaches for th
 `if (!omap->ready) return EIO;` as its first answer, and two more EIO returns inside its descent — those are
 the next lines to report.
 
+### The root cause, found
+
+The last jump is inside the device layer, and it is one block:
+
+```
+apfs: nx_block 2632: cache miss, checked -1, first bytes 00 00 00 00
+hakios dev_read: off 10780672 block 21056 chunk 4096, buffer 5a 5a 84 5a (base 0, devblock 512)
+apfs: nx_block 2632: single read at 10780672 error 0, got 5a 5a 84 5a
+apfs: node_at_h 2632: obj type 0, first bytes 5a 5a 84 5a 5a 5a 5a 5a
+apfs: node_at_h 2632: not a B-tree node (type 0)
+```
+
+Everything about the request is right: the offset `10780672` is block 2632 × 4096, the device block `10780672 / 512 = 21056` is right for the 512-byte block size md0 reports, and the 4096 bytes asked of `buf_meta_bread` are right too. What comes back is `5a 5a 84 5a` — memory fill, not the `86 4e 38 89 70 0b 8d 66` that `userland/system.apfs` holds at that offset. **`buf_meta_bread` on md0 answers success and leaves the buffer uninitialised.**
+
+That is the whole reason the large type-4 files fail and the small ones do not. Block 2632 is the B-tree node at depth 2 that a 200 KB or 318 KB resource fork needs and a 6 KB one never touches; `node_at_h` then reads `obj_type` 0 out of fill bytes, does not recognise a B-tree node, and answers EIO, which travels up as the read error, the cfile error and finally the executor's ENOEXEC.
+
+Two things to look at, in this order:
+
+1. **How md0 is built.** `apfs_mount_common` takes `devblock` from `DKIOCGETBLOCKSIZE` (512 here) and `APFS_META_CHUNK` is 4096, so `4096 % 512 == 0` passes its check; the read then goes to `buf_meta_bread(devvp, off / devblock, 4096, …)`. The resident image is a block of physical memory the loader filled and checked (`oem imgsum` gives `e5fd03a4a21d14cc` on the phone and the same number on the host file), so the bytes are there. What is not established is whether md0's own read path — its `d_strategy` or whatever stands in for one, reached through `buf_meta_bread` — copies them, and whether the buffer size it is asked for matches what it can deliver at that offset.
+2. **The buffer size.** `5a` is the kernel's own fill, and different bytes (`5a 5a 84 5a`, `5a da 87 5a`) come back on different runs, which is what uninitialised memory looks like. A buffer that `buf_meta_bread` returns without a completed read would explain it: the request succeeded far enough to hand back a buffer, but no I/O finished.
+
+A quick way to test the second: read that one block with `nx->dev.read` instead of `buf_meta_bread` (the branch that `cheap_requests` takes in `nx_block`), and see whether the bytes arrive. If they do, the fault is in the buffered path's setup for md0; if they do not, it is in md0's read itself.
+
 ### A trap that costs a boot each time
 
 `oem run` must be preceded by a fresh `oem ramdisk` and `stage` of `userland/system.apfs`. Without it the resident image
@@ -141,6 +164,48 @@ system image is only built when `userland/big` exists, and `build.sh` fills that
 libraries over 4 MB that the optional Turnip and Metal builds put in `root/lib` and `root/bin`. Without those builds, a
 `./build.sh` run quietly skips the system image and leaves the previous one in place — which is why a "rebuilt" image can
 turn out to be the old one.
+
+## What Android's driver actually does, watched from the kernel
+
+The missing measurement was taken with KernelPatch on the working phone: a small KPM hooks
+`goodix_spi_read` and prints every read the vendor driver makes, its address, its length and the first bytes that
+come back. The module lives in `E:\Project\KernelPatch\kpms\socrates-spy`; it is loaded with
+`su 10307 -c "truncate su module load /data/local/tmp/spy.kpm"` (uid 10307 is the manager, which passes the
+authentication), and its output goes to the kernel log.
+
+What it showed, over a hundred frames:
+
+| Address | Length | Rate | First byte |
+|---|---|---|---|
+| **`0x10400`** | **2500** | ~30 Hz | **`0x80`** |
+| `0x10174` | 16 | on commands | `0x80` after the write (the acknowledge) |
+
+So the report is read from **`0x10400`**, not from `0x10308` (the word the chip's own description gives, which this
+port had been reading and which never carries the status bit), and the acknowledge of a command is **byte 0** of the
+sixteen read back, not byte 1.
+
+The 2500 bytes are laid out like this, from captures on both systems:
+
+| Offset | What |
+|---|---|
+| `0x00` | `0x80` when there is data, plus the sequence number in `0x01` |
+| `0x04-0x07` | `08 e8 08 01`, the same in every frame on both systems |
+| `0x08-0x0b` | `07 00 00 <sequence>` |
+| `0x0c-0x0f`, `0x10-0x13` | frame and time counters, stepping every frame |
+| `0x14-0x1f` | mode words — and here the two systems differ: Android has `04 b6 10 00 20 00`, this port's driver has `02 38 04 00 f0 00` |
+| `0x20-0x47` | a table Android fills with `05 05 9f 01 a5 04 a2 a6 00` repeating; all zeros under this port |
+| `0x50-0x6f` | zeros |
+| `0x70-0xb1` | more mode and channel words |
+| `0xb2` onward | the raw capacitance frame: 16-bit values, `11 29 31 29 37 29 ...`, one per node |
+
+With the driver changed to read `0x10400` (`touch_android=1`), the chip answers on HakiOS exactly as it does on
+Android: `80 37 00 e8 08 e8 08 01 ...`, status bit set, counters stepping. **The chip has been reporting all along;
+the port was reading the wrong address.** What is not yet known is which bytes of the header carry a finger's
+coordinates — the captures taken so far had no finger on the panel at the moment the buffer was read, and the raw
+frame region has no coordinates in it, only capacitance.
+
+The next measurement is the same one again with a finger held on the panel while the header is dumped: the offsets
+that move are the coordinates.
 
 ## What the chip's memory holds, address by address
 

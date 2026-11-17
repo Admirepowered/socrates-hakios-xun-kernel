@@ -909,6 +909,22 @@ static bool (*spi_transfer)(const uint8_t *tx, uint8_t *rx, uint32_t length);
 
 static uint8_t spi_tx[8 + GOODIX_MAX_READ], spi_rx[8 + GOODIX_MAX_READ];
 static uint32_t touch_address, command_address;
+/*
+ * Android's driver, watched on the phone through a KernelPatch hook on goodix_spi_read, reads 0x10400
+ * for 2500 bytes thirty times a second, and the first byte of what it gets is 0x80.  The word this
+ * chip's description names for the report is 0x10308, whose first byte never carries it.  touch_android=1
+ * switches the reading to Android's address and prints the head of every report that has the bit set.
+ */
+static uint32_t android_report;   /* boot-arg touch_android=1: read the reports where Android reads them */
+static uint32_t dump_reports;     /* boot-arg touch_dump=1: print the head of each one that says it has data */
+/*
+ * Android's driver, watched on the phone through a KernelPatch hook on goodix_spi_read, reads 0x10400
+ * for 2500 bytes thirty times a second, and the first byte of what it gets is 0x80.  The word this
+ * chip's description names for the report is 0x10308, whose first byte never carries it.  touch_android=1
+ * switches the reading to Android's address and prints the head of every report that has the bit set.
+ */
+static uint32_t android_report;   /* boot-arg touch_android=1: read the reports where Android reads them */
+static uint32_t dump_reports;     /* boot-arg touch_dump=1: print the head of each one that says it has data */
 static const char *report_rate = "240";        /* what the status line says (touch_rate=480) */
 static uint32_t max_x = 14400, max_y = 32000;   /* 1440 x 3200 in tenths: the phone's tree says 0x3840 x 0x7d00 */
 
@@ -1095,6 +1111,19 @@ goodix_probe(bool verbose)
 			touch_address = want;
 			printf("goodix: reports are read from %#x instead\n", (uint64_t)touch_address);
 		}
+		if (PE_parse_boot_argn("touch_android", &want, sizeof(want)) && want != 0) {
+			touch_address = 0x10400;
+			dump_reports = 1;
+			printf("goodix: reading the reports where Android does, at %#x\n", (uint64_t)touch_address);
+		}
+		(void)PE_parse_boot_argn("touch_dump", &dump_reports, sizeof(dump_reports));
+		if (PE_parse_boot_argn("touch_android", &want, sizeof(want)) && want != 0) {
+			touch_address = 0x10400;
+			android_report = 1;
+			dump_reports = 1;
+			printf("goodix: reading the reports where Android does, at %#x\n", (uint64_t)touch_address);
+		}
+		(void)PE_parse_boot_argn("touch_dump", &dump_reports, sizeof(dump_reports));
 	}
 	{
 		uint32_t want = 0;
@@ -1260,6 +1289,70 @@ goodix_poll(void)
 	uint32_t count;
 
 	seen.polls++;
+	/*
+	 * touch_android=1 (with touch_dump): read where Android reads, and print the head of every report whose first
+	 * byte has the bit the chip's own handler looks for.  What those bytes are, and which of them move with a
+	 * finger, is the last thing the port does not know.
+	 */
+	if (android_report) {
+		static unsigned shown;
+
+		if (shown < 60 && goodix_read(touch_address, report, 64) && (report[0] & 0x80) != 0) {
+			shown++;
+			printf("goodix: report %u: %02x %02x %02x %02x %02x %02x %02x %02x"
+			    " | %02x %02x %02x %02x %02x %02x %02x %02x"
+			    " | %02x %02x %02x %02x %02x %02x %02x %02x"
+			    " | %02x %02x %02x %02x %02x %02x %02x %02x\n", (uint64_t)shown,
+			    report[0], report[1], report[2], report[3], report[4], report[5], report[6], report[7],
+			    report[8], report[9], report[10], report[11], report[12], report[13], report[14], report[15],
+			    report[16], report[17], report[18], report[19], report[20], report[21], report[22], report[23],
+			    report[24], report[25], report[26], report[27], report[28], report[29], report[30], report[31]);
+		}
+	}
+	/*
+	 * touch_android=1 (with touch_dump): read where Android reads, and print the head of every report whose first
+	 * byte has the bit the chip's own handler looks for.  What those bytes are, and which of them move with a
+	 * finger, is the last thing the port does not know.
+	 */
+	if (android_report) {
+		static unsigned shown;
+		static uint8_t whole[GOODIX_MAX_READ];
+
+		/*
+		 * Android reads 2500 bytes here in one go, and the bytes past the first 32 of that buffer were not
+		 * what a 64-byte read brought back.  The whole thing, once, to see where a finger shows up.
+		 */
+		if ((shown == 2 || shown == 45) && goodix_read(touch_address, whole, 2500) &&
+		    (whole[0] & 0x80) != 0) {
+			for (uint32_t at = 0; at < 2500; at += 16) {
+				printf("goodix: whole %u %04x: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+				    (uint64_t)shown, (uint64_t)at,
+				    whole[at + 0], whole[at + 1], whole[at + 2], whole[at + 3],
+				    whole[at + 4], whole[at + 5], whole[at + 6], whole[at + 7],
+				    whole[at + 8], whole[at + 9], whole[at + 10], whole[at + 11],
+				    whole[at + 12], whole[at + 13], whole[at + 14], whole[at + 15]);
+			}
+		}
+		if (shown < 60 && goodix_read(touch_address, report, 64) && (report[0] & 0x80) != 0) {
+			shown++;
+			printf("goodix: report %u: %02x %02x %02x %02x %02x %02x %02x %02x"
+			    " | %02x %02x %02x %02x %02x %02x %02x %02x"
+			    " | %02x %02x %02x %02x %02x %02x %02x %02x"
+			    " | %02x %02x %02x %02x %02x %02x %02x %02x\n", (uint64_t)shown,
+			    report[0], report[1], report[2], report[3], report[4], report[5], report[6], report[7],
+			    report[8], report[9], report[10], report[11], report[12], report[13], report[14], report[15],
+			    report[16], report[17], report[18], report[19], report[20], report[21], report[22], report[23],
+			    report[24], report[25], report[26], report[27], report[28], report[29], report[30], report[31]);
+			printf("goodix: report %u +32: %02x %02x %02x %02x %02x %02x %02x %02x"
+			    " | %02x %02x %02x %02x %02x %02x %02x %02x"
+			    " | %02x %02x %02x %02x %02x %02x %02x %02x"
+			    " | %02x %02x %02x %02x %02x %02x %02x %02x\n", (uint64_t)shown,
+			    report[32], report[33], report[34], report[35], report[36], report[37], report[38], report[39],
+			    report[40], report[41], report[42], report[43], report[44], report[45], report[46], report[47],
+			    report[48], report[49], report[50], report[51], report[52], report[53], report[54], report[55],
+			    report[56], report[57], report[58], report[59], report[60], report[61], report[62], report[63]);
+		}
+	}
 	/*
 	 * touch_dbg=2: the words around the report address, read twice, and which of them moved. The chip's description
 	 * names 0x10308 and the frame data at 0x10400 is seen to change with the panel, but the report word reads the same
