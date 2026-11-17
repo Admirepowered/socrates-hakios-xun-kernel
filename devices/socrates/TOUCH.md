@@ -207,6 +207,43 @@ frame region has no coordinates in it, only capacitance.
 The next measurement is the same one again with a finger held on the panel while the header is dumped: the offsets
 that move are the coordinates.
 
+## Every read the Android driver makes
+
+Both read entry points (`goodix_spi_read` and `goodix_spi_read_bra`) were hooked and every read was logged with its
+address, its length and its first bytes. Over a swipe, Android's driver asks the chip for exactly these:
+
+| Address | Length | When |
+|---|---|---|
+| `0x10400` | 2500 | ~30 times a second, the report/frame buffer |
+| `0x10174` | 16 | on commands; byte 0 of the answer is the `0x80` acknowledge |
+| `0x10070` | 2, then 193 | occasionally — the chip's own configuration |
+
+Nothing else. **There is no read of a small report structure anywhere**, and the 2500-byte buffer at `0x10400` was
+compared byte for byte between a finger held at (250, 700) and one held at (1000, 2200): the whole capacitance frame
+changes, as it must, and in the header only counters and three small words move —
+
+```
+000: 45184 vs 45696   (status 0x80 and the sequence number)
+00e:  1008 vs  1012   (a counter)
+010: 10861 vs 10865   (a counter, +4 per frame)
+012:   384 vs   128   (0x0180 vs 0x0080)
+01e:    36 vs    30
+072:    20 vs    15
+094:  9749 vs 36885   (0x2615 vs 0x9015, and the low byte is the same in both)
+```
+
+None of those is a coordinate. So **this firmware does not hand out touch positions over the transport at all**.
+That matches what the vendor module's strings said from the start: Xiaomi's THP (`thp_send_cmd_to_hal`,
+`thp_send_event_to_hal`) takes the frame to a userspace HAL, and the HAL is what finds the fingers and injects them
+through `uinput`. The kernel driver on this phone is a transport and a frame reader; the touch processing is not in
+it.
+
+What that means for the port: the chip, its supplies, its reset, its SPI mode handshake, its command channel, its
+configuration and its 2500-byte frame at `0x10400` all work under HakiOS — the driver reads `80 .. .. e8 08 e8 08 01`
+and a frame counter stepping at 30 Hz. What is missing is the step that turns that frame into points, which on this
+phone lives in a userspace daemon this port has not brought up. Peak detection over the 0x1000-odd capacitance nodes
+is the work, and the code that does it is Xiaomi's, not the chip's.
+
 ## What the chip's memory holds, address by address
 
 Read together, at every poll, so that each region's job is known rather than assumed:
