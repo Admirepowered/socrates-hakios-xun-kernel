@@ -2371,18 +2371,28 @@ goodix_thread(__unused void *parameter, __unused wait_result_t result)
 /*
  * Touch points out of the frame.
  *
- * This firmware does not hand over positions: the 2500 bytes at 0x10400 are the whole header, then a grid of
- * 16-bit capacitance values.  Android's driver sends them to Xiaomi's THP in userspace, which is where a finger
- * becomes a coordinate.  This does the same work here: keep a baseline that follows the slow drift, subtract it,
- * and find the nodes that stand out.
+ * This firmware does not hand over positions: the 2500 bytes at 0x10400 are a header, then a grid of 16-bit
+ * capacitance values.  Android's driver hands them to Xiaomi's THP in userspace, which is where a finger becomes
+ * a coordinate, so the port does that work here instead: a baseline follows the slow drift, the nodes that stand
+ * out are the finger, and their row and column come from the way the grid is laid out.
  *
- * The grid is not yet known, so what it reports is the node index of the strongest deviation and its neighbours;
- * touching known screen positions is what turns those indices into rows and columns.
+ * The grid is 1161 nodes, which is 27 by 43.  Touches at known places settled the order: taken as 27 rows of 43
+ * columns, indices read from a diagonal press come out on a diagonal (82 -> row 1, column 39; 164 -> row 3,
+ * column 35; 203 -> row 4, column 31; ... 646 -> row 15, column 1), which is the fingerprint of the right
+ * layout.  Taking 43 rows of 27 columns does not produce a line at all.
  */
 #define FRAME_HEADER     0xb2           /* where the 16-bit values start in the 2500-byte frame */
-#define FRAME_NODES      ((2500 - FRAME_HEADER) / 2)
+#define FRAME_COLS       43
+#define FRAME_ROWS       27
+#define FRAME_NODES      (FRAME_COLS * FRAME_ROWS)
+#define FRAME_MIN_BASE   0x0400         /* a node reading below this carries no panel information */
+#define FRAME_MAX_BASE   0x6000         /* nor one above it: those are references that drift on their own */
 
 static uint16_t frame_base[FRAME_NODES];
+static struct {
+	bool     down;
+	uint16_t x, y;
+} frame_contact;   /* the finger the frame is following, in the units the input layer takes */
 static unsigned frame_seen;
 static unsigned frame_prints;
 
@@ -2394,6 +2404,15 @@ frame_value(const uint8_t *frame, uint32_t i)
 	return (uint16_t)(p[0] | p[1] << 8);
 }
 
+static bool
+frame_usable(uint32_t i, const uint8_t *frame)
+{
+	uint16_t v = frame_value(frame, i);
+
+	return v >= FRAME_MIN_BASE && v <= FRAME_MAX_BASE &&
+	    frame_base[i] >= FRAME_MIN_BASE && frame_base[i] <= FRAME_MAX_BASE;
+}
+
 static void
 frame_touch(const uint8_t *frame)
 {
@@ -2401,8 +2420,8 @@ frame_touch(const uint8_t *frame)
 	uint32_t best_d = 0;
 
 	/*
-	 * The first frame becomes the baseline.  After that it follows the panel's drift slowly, so a finger --
-	 * present for a fraction of a second -- does not get absorbed into it.
+	 * The first frame becomes the baseline.  After that it follows the panel's slow drift, so a finger -- on the
+	 * panel for a fraction of a second -- does not get absorbed into it.
 	 */
 	for (uint32_t i = 0; i < FRAME_NODES; i++) {
 		uint16_t v = frame_value(frame, i);
@@ -2411,12 +2430,7 @@ frame_touch(const uint8_t *frame)
 			frame_base[i] = v;
 			continue;
 		}
-		/*
-		 * Nodes that are not wired read as all ones or as zero and flip between the two; their fiction would
-		 * always be the largest deviation there is.  Only a node that sits in the range real readings occupy
-		 * in both frames can say anything about a finger.
-		 */
-		if (v < 0x0400 || v > 0xfc00 || frame_base[i] < 0x0400 || frame_base[i] > 0xfc00) {
+		if (!frame_usable(i, frame)) {
 			continue;
 		}
 		{
@@ -2429,63 +2443,69 @@ frame_touch(const uint8_t *frame)
 		}
 	}
 	frame_seen++;
-	if (best < 0 || best_d < 200 || frame_prints >= 30) {
+	/*
+	 * A finger on the panel is a cluster of nodes whose capacitance drops; nothing on it means no touch, which is
+	 * how a release is seen.
+	 */
+	if (best < 0 || best_d < 200) {
+		if (frame_contact.down) {
+			hakios_touch_post(HAKIOS_TOUCH_UP, 0, frame_contact.x, frame_contact.y);
+			frame_contact.down = false;
+		}
 		return;
 	}
-	/* the three strongest, so that a whole finger -- not just its strongest node -- is visible */
+	/*
+	 * The centre of the finger, not its darkest node: the deviation is summed over the neighbours that are on the
+	 * panel and that stand out too, which is what makes the position stable from frame to frame.
+	 */
 	{
-		int top[3] = { -1, -1, -1 };
-		uint32_t topd[3] = { 0, 0, 0 };
+		int row = best / FRAME_COLS, col = best % FRAME_COLS;
+		int64_t sum_w = 0, sum_col = 0, sum_row = 0;
 
-		for (uint32_t i = 0; i < FRAME_NODES; i++) {
-			uint16_t v = frame_value(frame, i);
-			int32_t d;
-			int slot;
+		for (int dr = -2; dr <= 2; dr++) {
+			for (int dc = -2; dc <= 2; dc++) {
+				int r = row + dr, c = col + dc;
+				uint32_t i;
+				int32_t d;
 
-			if (v < 0x0400 || v > 0xfc00 || frame_base[i] < 0x0400 || frame_base[i] > 0xfc00) {
-				continue;
-			}
-			d = (int32_t)frame_base[i] - (int32_t)v;
-			if (d <= 0) {
-				continue;
-			}
-			for (slot = 0; slot < 3; slot++) {
-				if ((uint32_t)d > topd[slot]) {
-					for (int k = 2; k > slot; k--) {
-						top[k] = top[k - 1];
-						topd[k] = topd[k - 1];
-					}
-					top[slot] = (int)i;
-					topd[slot] = (uint32_t)d;
-					break;
+				if (r < 0 || r >= FRAME_ROWS || c < 0 || c >= FRAME_COLS) {
+					continue;
 				}
+				i = (uint32_t)(r * FRAME_COLS + c);
+				if (!frame_usable(i, frame)) {
+					continue;
+				}
+				d = (int32_t)frame_base[i] - (int32_t)frame_value(frame, i);
+				if (d < 100) {
+					continue;
+				}
+				sum_w += d;
+				sum_col += (int64_t)d * c;
+				sum_row += (int64_t)d * r;
 			}
 		}
-		if (topd[0] >= 200) {
-			frame_prints++;
-			printf("goodix: peaks %d/%u %d/%u %d/%u\n",
-			    (uint64_t)top[0], (uint64_t)topd[0],
-			    (uint64_t)top[1], (uint64_t)topd[1],
-			    (uint64_t)top[2], (uint64_t)topd[2]);
+		if (sum_w > 0) {
+			uint32_t x = (uint32_t)(sum_col * (int64_t)max_x / (sum_w * (FRAME_COLS - 1)));
+			uint32_t y = (uint32_t)(sum_row * (int64_t)max_y / (sum_w * (FRAME_ROWS - 1)));
+			uint32_t sx = x >= max_x ? 65535 : x * 65535 / max_x;
+			uint32_t sy = y >= max_y ? 65535 : y * 65535 / max_y;
+
+			if (!frame_contact.down) {
+				hakios_touch_post(HAKIOS_TOUCH_DOWN, 0, sx, sy);
+				frame_contact.down = true;
+			} else if (frame_contact.x != sx || frame_contact.y != sy) {
+				hakios_touch_post(HAKIOS_TOUCH_MOVE, 0, sx, sy);
+			}
+			frame_contact.x = (uint16_t)sx;
+			frame_contact.y = (uint16_t)sy;
+			if (frame_prints < 20) {
+				frame_prints++;
+				printf("goodix: finger at %u, %u (node %d, r%d c%d, dev %u)\n",
+				    (uint64_t)x, (uint64_t)y, (uint64_t)best, (uint64_t)row, (uint64_t)col,
+				    (uint64_t)best_d);
+			}
 		}
 	}
-	return;
-	if (best < 0 || best_d < 40 || frame_prints >= 40) {
-		return;
-	}
-	frame_prints++;
-	printf("goodix: node %d deviates by %u (base %u, now %u); around it %u %u %u %u %u\n",
-	    (uint64_t)best, (uint64_t)best_d, (uint64_t)frame_base[best],
-	    (uint64_t)frame_value(frame, (uint32_t)best),
-	    (uint64_t)(best > 0 ? frame_base[best - 1] - frame_value(frame, (uint32_t)best - 1) : 0),
-	    (uint64_t)(best + 1 < (int)FRAME_NODES ?
-	    frame_base[best + 1] - frame_value(frame, (uint32_t)best + 1) : 0),
-	    (uint64_t)(best + 16 < (int)FRAME_NODES ?
-	    frame_base[best + 16] - frame_value(frame, (uint32_t)best + 16) : 0),
-	    (uint64_t)(best + 40 < (int)FRAME_NODES ?
-	    frame_base[best + 40] - frame_value(frame, (uint32_t)best + 40) : 0),
-	    (uint64_t)(best + 128 < (int)FRAME_NODES ?
-	    frame_base[best + 128] - frame_value(frame, (uint32_t)best + 128) : 0));
 }
 
 /*

@@ -155,6 +155,8 @@ zigzag(double x, double y0, double y1, int ms, int times, int step_ms)
 int
 main(int argc, char **argv)
 {
+	/* unbuffered: what it prints is read while it is still running, and a kill must not take it along */
+	setvbuf(stdout, NULL, _IONBF, 0);
 	/* a gesture is a matter of timing: do not let the rest of a busy system stretch it */
 	pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
 	mach_timebase_info(&timebase);
