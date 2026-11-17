@@ -1318,6 +1318,19 @@ goodix_poll(void)
 	if (android_report) {
 		static unsigned shown;
 		static uint8_t whole[GOODIX_MAX_READ];
+		static uint64_t last_frame;
+		uint64_t now = timer_now();
+
+		/*
+		 * A frame read is 2500 bytes over a bit-banged bus -- 80000 GPIO accesses, some 13 milliseconds of
+		 * processor time -- and the chip presents a new one thirty times a second.  Reading faster than that
+		 * spends the machine on frames that are not there, which is what left a core spinning; the reading is
+		 * paced to the chip instead, whatever the poll interval asks for.
+		 */
+		if (last_frame != 0 && now - last_frame < 19200000ULL / 30) {
+			return;
+		}
+		last_frame = now;
 
 		/*
 		 * Android reads 2500 bytes here in one go, and the bytes past the first 32 of that buffer were not
@@ -1326,8 +1339,7 @@ goodix_poll(void)
 		if (goodix_read(touch_address, whole, 2500) && (whole[0] & 0x80) != 0) {
 			frame_touch(whole);
 		}
-		if ((shown == 2 || shown == 45) && goodix_read(touch_address, whole, 2500) &&
-		    (whole[0] & 0x80) != 0) {
+		if ((shown == 2 || shown == 45) && (whole[0] & 0x80) != 0) {
 			for (uint32_t at = 0; at < 2500; at += 16) {
 				printf("goodix: whole %u %04x: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
 				    (uint64_t)shown, (uint64_t)at,
