@@ -43,41 +43,57 @@ struct apfs_devctx {
 	uint64_t dc_base;               /* where on the device the container starts (bytes) */
 };
 
+extern int mdevgetkernelrange(dev_t dev, vm_offset_t *base, uint64_t *size);
+
 static int
 apfs_dev_read(void *ctx, uint64_t off, void *buf, size_t len)
 {
 	struct apfs_devctx *dc = ctx;
-	char *out = buf;
+	uio_t uio;
+	int error;
 
 	off += dc->dc_base;
 	if ((off % dc->dc_devblock) != 0) {
 		return EINVAL;
 	}
-	while (len > 0) {
-		buf_t bp = NULL;
-		size_t chunk = len < APFS_META_CHUNK ? len : APFS_META_CHUNK;
-		int error = (int)buf_meta_bread(dc->dc_devvp,
-		    (daddr64_t)(off / dc->dc_devblock), APFS_META_CHUNK, NOCRED, &bp);
-
-		if (error) {
-			if (bp != NULL) {
-				buf_brelse(bp);
-			}
-			return error;
-		}
-		memcpy(out, (const void *)buf_dataptr(bp), chunk);
-		/*
-		 * apfs_lib keeps its own cache of what it needs, and a volume this size would
-		 * otherwise fill the buffer cache with blocks nobody asks for twice.
-		 */
-		buf_markinvalid(bp);
-		buf_brelse(bp);
-
-		out += chunk;
-		off += chunk;
-		len -= chunk;
+	/*
+	 * Read the device the ordinary way, through VNOP_READ, rather than through buf_meta_bread.
+	 * The buffered path was handing back a buffer whose contents had never been filled -- the B-tree
+	 * node at 0x10400 of the image that the large resource forks need came back as the zone's fill
+	 * bytes, so every file over 64 KB failed with EIO while smaller ones read.  A read that goes to
+	 * the device's own read routine for the whole requested length cannot do that.
+	 */
+	uio = uio_create(1, off, UIO_SYSSPACE, UIO_READ);
+	if (uio == NULL) {
+		return ENOMEM;
 	}
-	return 0;
+	if (uio_addiov(uio, CAST_USER_ADDR_T((uintptr_t)buf), len) != 0) {
+		uio_free(uio);
+		return EINVAL;
+	}
+	error = VNOP_READ(dc->dc_devvp, uio, 0, vfs_context_kernel());
+	if (error == 0 && uio_resid(uio) != 0) {
+		/* a short read is a read that did not deliver: the caller asked for all of it */
+		error = EIO;
+	}
+	if (error != 0) {
+		printf("hakios dev_read: off %llu len %zu error %d resid %lld\n",
+		    (unsigned long long)off, len, error, (long long)uio_resid(uio));
+	} else if (off == (14798ULL << 12)) {
+		const uint8_t *q = (const uint8_t *)buf;
+
+		printf("hakios dev_read: off %llu len %zu got %02x %02x %02x %02x\n",
+		    (unsigned long long)off, len, q[0], q[1], q[2], q[3]);
+	}
+	if (off == 10780672) {
+		const uint8_t *d = (const uint8_t *)buf;
+
+		printf("hakios dev_read: off %llu len %zu error %d resid %lld, got %02x %02x %02x %02x\n",
+		    (unsigned long long)off, len, error, (long long)uio_resid(uio),
+		    d[0], d[1], d[2], d[3]);
+	}
+	uio_free(uio);
+	return error;
 }
 
 /*
@@ -94,40 +110,40 @@ static int
 apfs_dev_read_data(void *ctx, uint64_t off, void *buf, size_t len)
 {
 	struct apfs_devctx *dc = ctx;
-	char *out = buf;
+	uint8_t *out = buf;
+	int error;
 
 	off += dc->dc_base;
 	if ((off % dc->dc_devblock) != 0 || (len % dc->dc_devblock) != 0) {
 		return EINVAL;
 	}
+	/*
+	 * One page at a time.  A read of sixteen kilobytes through the block device came back with the buffer
+	 * untouched, while the same call for four kilobytes brought the right bytes -- the page is the largest
+	 * request this path delivers, so the loop asks for pages.
+	 */
 	while (len > 0) {
-		size_t n = len < APFS_DATA_MAX ? len : APFS_DATA_MAX;
-		buf_t bp = buf_alloc(dc->dc_devvp);
-		int error;
+		size_t chunk = len < 4096 ? len : 4096;
+		uio_t uio = uio_create(1, off, UIO_SYSSPACE, UIO_READ);
 
-		if (bp == NULL) {
+		if (uio == NULL) {
 			return ENOMEM;
 		}
-		buf_reset(bp, B_READ);
-		buf_setblkno(bp, (daddr64_t)(off / dc->dc_devblock));
-		buf_setlblkno(bp, (daddr64_t)(off / dc->dc_devblock));
-		buf_setcount(bp, (uint32_t)n);
-		buf_setdataptr(bp, (uintptr_t)out);
-		error = VNOP_STRATEGY(bp);
-		if (error == 0) {
-			error = (int)buf_biowait(bp);
+		if (uio_addiov(uio, CAST_USER_ADDR_T((uintptr_t)out), chunk) != 0) {
+			uio_free(uio);
+			return EINVAL;
 		}
-		/* read() must fill the whole buffer, and so must this (md cuts the count short) */
-		if (error == 0 && (buf_resid(bp) != 0 || buf_count(bp) != n)) {
+		error = VNOP_READ(dc->dc_devvp, uio, 0, vfs_context_kernel());
+		if (error == 0 && uio_resid(uio) != 0) {
 			error = EIO;
 		}
-		buf_free(bp);
-		if (error) {
+		uio_free(uio);
+		if (error != 0) {
 			return error;
 		}
-		out += n;
-		off += n;
-		len -= n;
+		out += chunk;
+		off += chunk;
+		len -= chunk;
 	}
 	return 0;
 }
