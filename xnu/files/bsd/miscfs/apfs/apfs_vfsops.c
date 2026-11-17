@@ -45,6 +45,39 @@ struct apfs_devctx {
 
 extern int mdevgetkernelrange(dev_t dev, vm_offset_t *base, uint64_t *size);
 
+/*
+ * A copy straight out of the memory device fits what this port needs: the image is a block of kernel memory
+ * and mdevgetkernelrange() names it exactly as memdev was given it.  Every buffered path below ends up asking
+ * for a cluster-sized transfer into a page-sized destination, which is what delivered the wrong bytes for the
+ * B-tree node at 57 MB, so the copy is tried first and the device is asked only if it cannot be done.
+ */
+static int
+apfs_dev_copy(void *ctx, uint64_t off, void *buf, size_t len)
+{
+	struct apfs_devctx *dc = ctx;
+	vm_offset_t base = 0;
+	uint64_t size = 0;
+	uint64_t at = off + dc->dc_base;
+	dev_t dev = vnode_specrdev(dc->dc_devvp);
+	static unsigned said;
+
+	if (mdevgetkernelrange(dev, &base, &size) != 0 || base == 0 || size == 0) {
+		return -1;
+	}
+	if (at > size || len > size - at) {
+		return EIO;
+	}
+	memcpy(buf, (const void *)(base + at), len);
+	if (said++ < 40 || at == 60612608 || at == 10780672) {
+		const uint8_t *d = (const uint8_t *)buf;
+
+		printf("hakios dev_copy: at %llu from %llx (%llu of %llu): %02x %02x %02x %02x\n",
+		    (unsigned long long)at, (unsigned long long)(base + at),
+		    (unsigned long long)len, (unsigned long long)size, d[0], d[1], d[2], d[3]);
+	}
+	return 0;
+}
+
 static int
 apfs_dev_read(void *ctx, uint64_t off, void *buf, size_t len)
 {
