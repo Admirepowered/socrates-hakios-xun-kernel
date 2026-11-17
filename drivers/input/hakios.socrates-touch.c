@@ -1044,6 +1044,7 @@ touch_reset(void)
 
 /* Is the chip there and running its firmware? Finds where it keeps the touch report. */
 static void config_probe(uint32_t config_address);
+static void frame_touch(const uint8_t *frame);
 static bool config_download(uint32_t config_address);
 
 static bool
@@ -1322,6 +1323,9 @@ goodix_poll(void)
 		 * Android reads 2500 bytes here in one go, and the bytes past the first 32 of that buffer were not
 		 * what a 64-byte read brought back.  The whole thing, once, to see where a finger shows up.
 		 */
+		if (goodix_read(touch_address, whole, 2500) && (whole[0] & 0x80) != 0) {
+			frame_touch(whole);
+		}
 		if ((shown == 2 || shown == 45) && goodix_read(touch_address, whole, 2500) &&
 		    (whole[0] & 0x80) != 0) {
 			for (uint32_t at = 0; at < 2500; at += 16) {
@@ -2361,6 +2365,127 @@ goodix_thread(__unused void *parameter, __unused wait_result_t result)
 		}
 		sleep_yielding(poll_us);
 	}
+}
+
+
+/*
+ * Touch points out of the frame.
+ *
+ * This firmware does not hand over positions: the 2500 bytes at 0x10400 are the whole header, then a grid of
+ * 16-bit capacitance values.  Android's driver sends them to Xiaomi's THP in userspace, which is where a finger
+ * becomes a coordinate.  This does the same work here: keep a baseline that follows the slow drift, subtract it,
+ * and find the nodes that stand out.
+ *
+ * The grid is not yet known, so what it reports is the node index of the strongest deviation and its neighbours;
+ * touching known screen positions is what turns those indices into rows and columns.
+ */
+#define FRAME_HEADER     0xb2           /* where the 16-bit values start in the 2500-byte frame */
+#define FRAME_NODES      ((2500 - FRAME_HEADER) / 2)
+
+static uint16_t frame_base[FRAME_NODES];
+static unsigned frame_seen;
+static unsigned frame_prints;
+
+static uint16_t
+frame_value(const uint8_t *frame, uint32_t i)
+{
+	const uint8_t *p = frame + FRAME_HEADER + 2 * i;
+
+	return (uint16_t)(p[0] | p[1] << 8);
+}
+
+static void
+frame_touch(const uint8_t *frame)
+{
+	int best = -1;
+	uint32_t best_d = 0;
+
+	/*
+	 * The first frame becomes the baseline.  After that it follows the panel's drift slowly, so a finger --
+	 * present for a fraction of a second -- does not get absorbed into it.
+	 */
+	for (uint32_t i = 0; i < FRAME_NODES; i++) {
+		uint16_t v = frame_value(frame, i);
+
+		if (frame_seen == 0) {
+			frame_base[i] = v;
+			continue;
+		}
+		/*
+		 * Nodes that are not wired read as all ones or as zero and flip between the two; their fiction would
+		 * always be the largest deviation there is.  Only a node that sits in the range real readings occupy
+		 * in both frames can say anything about a finger.
+		 */
+		if (v < 0x0400 || v > 0xfc00 || frame_base[i] < 0x0400 || frame_base[i] > 0xfc00) {
+			continue;
+		}
+		{
+			int32_t d = (int32_t)frame_base[i] - (int32_t)v;   /* a finger lowers the capacitance */
+
+			if (d > 0 && (uint32_t)d > best_d) {
+				best_d = (uint32_t)d;
+				best = (int)i;
+			}
+		}
+	}
+	frame_seen++;
+	if (best < 0 || best_d < 200 || frame_prints >= 30) {
+		return;
+	}
+	/* the three strongest, so that a whole finger -- not just its strongest node -- is visible */
+	{
+		int top[3] = { -1, -1, -1 };
+		uint32_t topd[3] = { 0, 0, 0 };
+
+		for (uint32_t i = 0; i < FRAME_NODES; i++) {
+			uint16_t v = frame_value(frame, i);
+			int32_t d;
+			int slot;
+
+			if (v < 0x0400 || v > 0xfc00 || frame_base[i] < 0x0400 || frame_base[i] > 0xfc00) {
+				continue;
+			}
+			d = (int32_t)frame_base[i] - (int32_t)v;
+			if (d <= 0) {
+				continue;
+			}
+			for (slot = 0; slot < 3; slot++) {
+				if ((uint32_t)d > topd[slot]) {
+					for (int k = 2; k > slot; k--) {
+						top[k] = top[k - 1];
+						topd[k] = topd[k - 1];
+					}
+					top[slot] = (int)i;
+					topd[slot] = (uint32_t)d;
+					break;
+				}
+			}
+		}
+		if (topd[0] >= 200) {
+			frame_prints++;
+			printf("goodix: peaks %d/%u %d/%u %d/%u\n",
+			    (uint64_t)top[0], (uint64_t)topd[0],
+			    (uint64_t)top[1], (uint64_t)topd[1],
+			    (uint64_t)top[2], (uint64_t)topd[2]);
+		}
+	}
+	return;
+	if (best < 0 || best_d < 40 || frame_prints >= 40) {
+		return;
+	}
+	frame_prints++;
+	printf("goodix: node %d deviates by %u (base %u, now %u); around it %u %u %u %u %u\n",
+	    (uint64_t)best, (uint64_t)best_d, (uint64_t)frame_base[best],
+	    (uint64_t)frame_value(frame, (uint32_t)best),
+	    (uint64_t)(best > 0 ? frame_base[best - 1] - frame_value(frame, (uint32_t)best - 1) : 0),
+	    (uint64_t)(best + 1 < (int)FRAME_NODES ?
+	    frame_base[best + 1] - frame_value(frame, (uint32_t)best + 1) : 0),
+	    (uint64_t)(best + 16 < (int)FRAME_NODES ?
+	    frame_base[best + 16] - frame_value(frame, (uint32_t)best + 16) : 0),
+	    (uint64_t)(best + 40 < (int)FRAME_NODES ?
+	    frame_base[best + 40] - frame_value(frame, (uint32_t)best + 40) : 0),
+	    (uint64_t)(best + 128 < (int)FRAME_NODES ?
+	    frame_base[best + 128] - frame_value(frame, (uint32_t)best + 128) : 0));
 }
 
 /*
