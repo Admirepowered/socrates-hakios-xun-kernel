@@ -744,9 +744,27 @@ if [ -f $DARWIN/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 		# -f: a cryptex fetched with the cache already in it would otherwise stop the build
 		ln -f "$f" $D/
 	done
+	# dyld asks for the cache at this path and nowhere else: on a device the directory is there whether
+	# the cache is in the OS cryptex or in the root, and a session whose image has only the cryptex copy
+	# answers "no dyld cache" and then fails every dynamically linked program with
+	# "Library not loaded: /usr/lib/libSystem.B.dylib".  The link is what a device has.
+	mkdir -p sysroot/System/Library/Caches
+	ln -sfn /System/Cryptexes/OS/System/Library/Caches/com.apple.dyld \
+	    sysroot/System/Library/Caches/com.apple.dyld
 	# zlib where it saves room, as Apple keeps the root (a small file whole in its attribute): 5.4 GB of
-	# files in 2.5 GB, what fits into the phone's RAM beside Darwin
-	python3 ../tools/apfs/mkapfs.py -z -o system.apfs System=sysroot,manifest=$DARWIN/system.manifest | tail -1
+	# files in 2.5 GB, what fits into the phone's RAM beside Darwin -- but NOT the dyld shared cache.  dyld
+	# maps that file; a file whose contents live in a decmpfs resource fork has no bytes at its own offsets
+	# to map, so a compressed cache is the same to dyld as no cache at all ("no dyld cache", then every
+	# dynamically linked program dies with "Library not loaded: /usr/lib/libSystem.B.dylib").  Apple keeps
+	# it uncompressed on a device for exactly this reason.
+	python3 ../tools/apfs/mkapfs.py -z \
+	    --plain sbin \
+	    --plain usr/lib \
+	    --plain usr/local/lib \
+	    --plain System/Cryptexes/OS/System/Library/Caches/com.apple.dyld \
+	    --plain System/Library/Caches/com.apple.dyld \
+	    --plain private/preboot/Cryptexes/OS/System/Library/Caches/com.apple.dyld \
+	    -o system.apfs System=sysroot,manifest=$DARWIN/system.manifest | tail -1
 	[ -z "$CHECK" ] || ../tools/apfs/check-image.sh system.apfs System=sysroot,manifest=$DARWIN/system.manifest
 	rm -rf sysroot
 fi
