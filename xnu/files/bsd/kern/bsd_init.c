@@ -1093,6 +1093,18 @@ bsdinit_task(void)
 	bsd_init_kprintf("bsd_do_post - done");
 
 	/*
+	 * The NVRAM controller this port was missing (drivers/core/hakios.nvram.cpp).  IOKit has the variables -- the
+	 * loader leaves a whole NVRAM image in the device tree -- but serialising them needs an IONVRAMController, and
+	 * with none registered every shutdown logged "No _nvramController" and failed its sync.  Registered here, where
+	 * IOKit is up and the kernel is still single-threaded.
+	 */
+	{
+		extern void HakiosNVRAMStart(void);
+
+		HakiosNVRAMStart();
+	}
+
+	/*
 	 * boot-arg no_init=1: stop before the first user process. The port's userland does not always come up here
 	 * (/sbin/launchd fails with ENOEXEC), and a driver that talks to hardware wants to be watched with the kernel
 	 * still alive: with this set, the machine idles with everything else up and the loader takes it back as usual.
