@@ -1512,9 +1512,9 @@ apfs_seek(struct apfs_btree *tree, uint64_t obj_id, uint8_t type,
 	int error = seek_to(tree, &t, cur);
 
 	if (error) {
-		apfs_log("apfs_seek %llu type %u: seek_to: %d (tree root %llu, has_fext %d)\n",
+		apfs_log("apfs_seek %llu type %u: seek_to: %d (tree root %llu, flags %#x)\n",
 		    (unsigned long long)obj_id, (unsigned)type, error,
-		    (unsigned long long)tree->root);
+		    (unsigned long long)tree->root, (unsigned)tree->flags);
 	}
 	return error;
 }
@@ -1666,7 +1666,7 @@ apfs_inode_get(struct apfs_vol *vol, uint64_t obj_id, struct apfs_inode *ino)
 	error = apfs_seek(&vol->tree, obj_id, APFS_TYPE_INODE, &cur);
 	if (error) {
 		/* which step of the walk failed, for an inode whose record is not reached */
-		printf("hakios inode_get %llu: seek -> %d (root %llu, has_fext %d)\n",
+		printf("hakios inode_get %llu: seek -> %d (root %llu, flags %#x)\n",
 		    (unsigned long long)obj_id, error,
 		    (unsigned long long)vol->tree.root, (int)vol->tree.flags);
 		return error;
