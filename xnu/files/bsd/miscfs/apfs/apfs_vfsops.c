@@ -119,35 +119,6 @@ apfs_dev_read(void *ctx, uint64_t off, void *buf, size_t len)
 		off += chunk;
 		len -= chunk;
 	}
-	/*
-	 * How far into the image this device delivers what the loader wrote: one page every few megabytes, reported
-	 * once.  The B-tree node at 10 MB arrives and the one at 57 MB does not, so the boundary is between them.
-	 */
-	{
-		static int probed;
-
-		if (!probed) {
-			static const uint64_t at[] = {
-				0, 0xfda000, 0x3ebf000, 0x39ce000, 0x1000000, 0x6000000,
-			};
-			uint8_t page[4096];
-
-			probed = 1;
-			for (unsigned i = 0; i < sizeof(at) / sizeof(at[0]); i++) {
-				uio_t u = uio_create(1, at[i], UIO_SYSSPACE, UIO_READ);
-				int e = EIO;
-
-				if (u != NULL) {
-					uio_addiov(u, CAST_USER_ADDR_T((uintptr_t)page), sizeof(page));
-					e = VNOP_READ(dc->dc_devvp, u, 0, vfs_context_kernel());
-					uio_free(u);
-				}
-				printf("hakios probe: at %#llx (%llu MB) error %d: %02x %02x %02x %02x\n",
-				    (unsigned long long)at[i], (unsigned long long)(at[i] >> 20), e,
-				    page[0], page[1], page[2], page[3]);
-			}
-		}
-	}
 	return 0;
 }
 

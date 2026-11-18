@@ -314,18 +314,6 @@ nx_block_unlocked(struct apfs_nx *nx, uint64_t addr, const uint8_t **out, bool v
 	t0 = apfs_ticks();
 	error = nx->dev.read_data(nx->dev.ctx, first * (uint64_t)bs, mine, (size_t)count * bs);
 	dt = apfs_ticks() - t0;
-	/*
-	 * The run this block came out of, and what the run's buffer holds: a block that reaches the cache as fill
-	 * bytes says either the request was not answered or the copy took the wrong part of the run.
-	 */
-	if (addr == 14798 || addr == 2632 || addr == 4058 || addr == 16063) {
-		uint64_t at = (addr - first) * bs;
-
-		apfs_log("nx_block %llu: run %llu count %llu, error %d; run[0] %02x %02x, at+%llu %02x %02x %02x %02x\n",
-		    (unsigned long long)addr, (unsigned long long)first, (unsigned long long)count, error,
-		    mine[0], mine[1], (unsigned long long)at,
-		    mine[at], mine[at + 1], mine[at + 2], mine[at + 3]);
-	}
 	if (addr == 2632) {
 		apfs_log("nx_block 2632: run %llu count %llu offset %llu len %zu error %d first bytes %02x %02x %02x %02x\n",
 		    (unsigned long long)first, (unsigned long long)count,
@@ -363,13 +351,6 @@ nx_block_unlocked(struct apfs_nx *nx, uint64_t addr, const uint8_t **out, bool v
 		}
 		memcpy(b->data, mine + (addr - first) * bs, bs);
 		nx->reads++;
-		/* what the block at 57 MB holds once the device has been asked for it */
-		if (addr == 14798) {
-			apfs_log("block 14798 read: %02x %02x %02x %02x %02x %02x %02x %02x"
-			    " (image has b6 ad c8 c6), size %u\n",
-			    b->data[0], b->data[1], b->data[2], b->data[3],
-			    b->data[4], b->data[5], b->data[6], b->data[7], bs);
-		}
 		if (verify && !apfs_checksum_ok(b->data, bs)) {
 			apfs_log("block %llu: bad checksum (bs %u first %llu count %llu): %02x %02x %02x %02x %02x %02x %02x %02x stored %llx calc %llx\n",
 			    (unsigned long long)addr, bs, (unsigned long long)first, (unsigned long long)count,
@@ -439,11 +420,6 @@ nx_block(struct apfs_nx *nx, uint64_t addr, const uint8_t **out, bool verify)
 		    b != NULL ? b->data[2] : 0, b != NULL ? b->data[3] : 0);
 	}
 	if (b != NULL) {
-		if (addr == 14798 || addr == 2632 || addr == 4058 || addr == 16063) {
-			apfs_log("nx_block %llu: cache hit, checked %d, first bytes %02x %02x %02x %02x\n",
-			    (unsigned long long)addr, (int)b->checked,
-			    b->data[0], b->data[1], b->data[2], b->data[3]);
-		}
 		if (verify && !b->checked) {
 			/* brought in as a neighbour, asked for now */
 			if (!apfs_checksum_ok(b->data, nx->block_size)) {
