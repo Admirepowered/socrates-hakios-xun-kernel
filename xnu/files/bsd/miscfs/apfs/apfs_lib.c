@@ -2020,10 +2020,20 @@ lookup_hashed(struct apfs_vol *vol, uint64_t dir_id, const char *name, size_t na
 			return error;   /* ENOENT at the end of the tree */
 		}
 		if (rec.obj_id != dir_id || rec.type != APFS_TYPE_DIR_REC || rec.key_len < 12) {
+			/*
+			 * The walk began somewhere else entirely -- a name that is there is answered ENOENT
+			 * from here, which is how /System stopped answering once the fill bytes had gone.
+			 */
+			printf("hakios lookup '%.*s' dir %llu hash %#x: walk gave obj %llu type %u keylen %u\n",
+			    (int)name_len, name, (unsigned long long)dir_id, hash,
+			    (unsigned long long)rec.obj_id, (unsigned)rec.type, (unsigned)rec.key_len);
 			return ENOENT;
 		}
 		nlh = le32(rec.key + 8);
 		if ((nlh >> APFS_J_DREC_HASH_SHIFT) != hash) {
+			printf("hakios lookup '%.*s' dir %llu hash %#x: next record hash %#x\n",
+			    (int)name_len, name, (unsigned long long)dir_id, hash,
+			    nlh >> APFS_J_DREC_HASH_SHIFT);
 			return ENOENT;  /* past the records with this hash */
 		}
 		len = nlh & APFS_J_DREC_LEN_MASK;
