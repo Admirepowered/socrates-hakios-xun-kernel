@@ -1093,6 +1093,22 @@ bsdinit_task(void)
 	bsd_init_kprintf("bsd_do_post - done");
 
 	/*
+	 * sr_preload=1: fill the shared region with the dyld shared cache before the first process is exec'ed.
+	 * dyld normally does this itself, and a session where it decides not to answers "no dyld cache" to
+	 * every process and then fails every dynamic program on /usr/lib/libSystem.B.dylib.  Off unless asked
+	 * for; see hakios_shared_region_preload() in bsd/vm/vm_unix.c.
+	 */
+	{
+		uint32_t preload = 0;
+
+		if (PE_parse_boot_argn("sr_preload", &preload, sizeof(preload)) && preload) {
+			extern int hakios_shared_region_preload(void);
+
+			printf("bsd_init: sr_preload: %d\n", hakios_shared_region_preload());
+		}
+	}
+
+	/*
 	 * The NVRAM controller this port was missing (drivers/core/hakios.nvram.cpp).  IOKit has the variables -- the
 	 * loader leaves a whole NVRAM image in the device tree -- but serialising them needs an IONVRAMController, and
 	 * with none registered every shutdown logged "No _nvramController" and failed its sync.  Registered here, where
