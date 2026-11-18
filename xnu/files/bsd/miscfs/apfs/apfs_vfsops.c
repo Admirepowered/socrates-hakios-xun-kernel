@@ -128,7 +128,7 @@ apfs_dev_read(void *ctx, uint64_t off, void *buf, size_t len)
 
 		if (!probed) {
 			static const uint64_t at[] = {
-				0, 0x1000000, 0x39ce000, 0x3a00000, 0x3a6e000, 0x3b00000, 0x39d0000, 0x6000000,
+				0, 0xfda000, 0x3ebf000, 0x39ce000, 0x1000000, 0x6000000,
 			};
 			uint8_t page[4096];
 

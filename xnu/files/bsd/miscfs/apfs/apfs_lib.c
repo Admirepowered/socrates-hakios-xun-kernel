@@ -396,6 +396,16 @@ nx_block_unlocked(struct apfs_nx *nx, uint64_t addr, const uint8_t **out, bool v
 		if (nb == NULL) {
 			break;
 		}
+		/*
+		 * Only the block that was asked for is taken from the run.  A neighbour came out of this memcpy as
+		 * fill bytes for the block that the tree then needed (0x5a 0x5a ... where the image has a B-tree
+		 * node), and because the checksum is not acted on the garbage stayed in the cache marked good:
+		 * /System answered EIO from then on and with it the dyld shared cache.  Reading the neighbour when
+		 * it is asked for costs one more small read and gives the device's own bytes.
+		 */
+		if (i != addr) {
+			break;
+		}
 		memcpy(nb->data, mine + (i - first) * bs, bs);
 		nb->checked = false;
 		nb->ref = false;
