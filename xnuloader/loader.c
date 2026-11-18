@@ -2874,7 +2874,6 @@ choose_window(const struct payload_info *pi)
 	uint64_t map_size = sizeof(map_buf), map_key, desc_size;
 	uint32_t desc_ver;
 	uint64_t best_base = 0, best_size = 0;
-	uint64_t low_base = 0, low_size = 0;
 	uint64_t pay_lo = PAYLOAD_BASE, pay_hi = PAYLOAD_BASE + PAYLOAD_MAX_SIZE;
 
 	if (win_size != 0) {
@@ -2905,29 +2904,8 @@ choose_window(const struct payload_info *pi)
 			best_base = lo;
 			best_size = hi - lo;
 		}
-		/*
-		 * The image the kernel mounts lives in this window, and everything the kernel does with a
-		 * physical address -- phystokv() for one -- has to name the bytes that are really there.  Past
-		 * 4 GB that stopped holding: the whole range answered pmap_find_phys, yet only the first ten
-		 * megabytes of it were the image, and a device that copied from a physical address faulted.
-		 * A window that ends below 4 GB is preferred whenever one is big enough to hold the image.
-		 */
-		if (hi <= 0x100000000ULL && hi > lo && hi - lo > low_size) {
-			low_base = lo;
-			low_size = hi - lo;
-		}
 	}
-	print("largest free block %x size %x; largest below 4 GB %x size %x\n",
-	    best_base, best_size, low_base, low_size);
-	{
-		uint64_t need = pi->resident_size + RESIDENT_RD_OFFSET;
-
-		if (low_size >= need) {
-			print("the image needs %x: taking the window below 4 GB\n", need);
-			best_base = low_base;
-			best_size = low_size;
-		}
-	}
+	print("largest free block %x size %x\n", best_base, best_size);
 	if (pi->forced_base != 0) {
 		best_base = pi->forced_base;
 		best_size = MAX_MEM_SIZE;

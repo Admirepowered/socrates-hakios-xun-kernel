@@ -82,7 +82,7 @@ static int
 apfs_dev_read(void *ctx, uint64_t off, void *buf, size_t len)
 {
 	struct apfs_devctx *dc = ctx;
-	uio_t uio;
+	uint8_t *out = buf;
 	int error;
 
 	off += dc->dc_base;
@@ -90,43 +90,65 @@ apfs_dev_read(void *ctx, uint64_t off, void *buf, size_t len)
 		return EINVAL;
 	}
 	/*
-	 * Read the device the ordinary way, through VNOP_READ, rather than through buf_meta_bread.
-	 * The buffered path was handing back a buffer whose contents had never been filled -- the B-tree
-	 * node at 0x10400 of the image that the large resource forks need came back as the zone's fill
-	 * bytes, so every file over 64 KB failed with EIO while smaller ones read.  A read that goes to
-	 * the device's own read routine for the whole requested length cannot do that.
+	 * One page at a time.  A single request for a cluster -- sixteen kilobytes -- through this device came
+	 * back with the destination untouched, and the same request for four kilobytes brought the right bytes:
+	 * the page is the largest transfer that lands, so both metadata and data are asked for in pages.  The
+	 * B-tree node at 57 MB is reached this way; it answered EIO for as long as the whole cluster was asked
+	 * for at once.
 	 */
-	uio = uio_create(1, off, UIO_SYSSPACE, UIO_READ);
-	if (uio == NULL) {
-		return ENOMEM;
-	}
-	if (uio_addiov(uio, CAST_USER_ADDR_T((uintptr_t)buf), len) != 0) {
+	while (len > 0) {
+		size_t chunk = len < 4096 ? len : 4096;
+		uio_t uio = uio_create(1, off, UIO_SYSSPACE, UIO_READ);
+
+		if (uio == NULL) {
+			return ENOMEM;
+		}
+		if (uio_addiov(uio, CAST_USER_ADDR_T((uintptr_t)out), chunk) != 0) {
+			uio_free(uio);
+			return EINVAL;
+		}
+		error = VNOP_READ(dc->dc_devvp, uio, 0, vfs_context_kernel());
+		if (error == 0 && uio_resid(uio) != 0) {
+			error = EIO;
+		}
 		uio_free(uio);
-		return EINVAL;
+		if (error != 0) {
+			return error;
+		}
+		out += chunk;
+		off += chunk;
+		len -= chunk;
 	}
-	error = VNOP_READ(dc->dc_devvp, uio, 0, vfs_context_kernel());
-	if (error == 0 && uio_resid(uio) != 0) {
-		/* a short read is a read that did not deliver: the caller asked for all of it */
-		error = EIO;
-	}
-	if (error != 0) {
-		printf("hakios dev_read: off %llu len %zu error %d resid %lld\n",
-		    (unsigned long long)off, len, error, (long long)uio_resid(uio));
-	} else if (off == (14798ULL << 12)) {
-		const uint8_t *q = (const uint8_t *)buf;
+	/*
+	 * How far into the image this device delivers what the loader wrote: one page every few megabytes, reported
+	 * once.  The B-tree node at 10 MB arrives and the one at 57 MB does not, so the boundary is between them.
+	 */
+	{
+		static int probed;
 
-		printf("hakios dev_read: off %llu len %zu got %02x %02x %02x %02x\n",
-		    (unsigned long long)off, len, q[0], q[1], q[2], q[3]);
-	}
-	if (off == 10780672) {
-		const uint8_t *d = (const uint8_t *)buf;
+		if (!probed) {
+			static const uint64_t at[] = {
+				0, 0x1000000, 0x39ce000, 0x3a00000, 0x3a6e000, 0x3b00000, 0x39d0000, 0x6000000,
+			};
+			uint8_t page[4096];
 
-		printf("hakios dev_read: off %llu len %zu error %d resid %lld, got %02x %02x %02x %02x\n",
-		    (unsigned long long)off, len, error, (long long)uio_resid(uio),
-		    d[0], d[1], d[2], d[3]);
+			probed = 1;
+			for (unsigned i = 0; i < sizeof(at) / sizeof(at[0]); i++) {
+				uio_t u = uio_create(1, at[i], UIO_SYSSPACE, UIO_READ);
+				int e = EIO;
+
+				if (u != NULL) {
+					uio_addiov(u, CAST_USER_ADDR_T((uintptr_t)page), sizeof(page));
+					e = VNOP_READ(dc->dc_devvp, u, 0, vfs_context_kernel());
+					uio_free(u);
+				}
+				printf("hakios probe: at %#llx (%llu MB) error %d: %02x %02x %02x %02x\n",
+				    (unsigned long long)at[i], (unsigned long long)(at[i] >> 20), e,
+				    page[0], page[1], page[2], page[3]);
+			}
+		}
 	}
-	uio_free(uio);
-	return error;
+	return 0;
 }
 
 /*
