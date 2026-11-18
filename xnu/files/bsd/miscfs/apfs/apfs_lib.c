@@ -875,9 +875,20 @@ node_child_addr(struct apfs_btree *tree, const struct node *n, uint32_t i, uint6
 		apfs_log("a sealed tree's node with a %u-byte child entry (only SHA-256 is known here)\n", vl);
 		return ENOTSUP;
 	}
-	oid = le64(v) + tree->root_oid;
+	/*
+	 * The child's identifier is the value itself.  It was taken to be an offset from the root's
+	 * identifier -- which is what apfsck's own note says of a sealed tree -- and on this image that
+	 * resolves to an object the map does not have: ENOENT from here, the seek gives up, and the
+	 * inode is reported as missing.  /System (inode 9164), /Library and /usr/share were all lost
+	 * that way.  The plain value is tried first and the offset form kept as a fallback, so an image
+	 * that really is laid out that way still reads.
+	 */
+	oid = le64(v);
 	memcpy(hash, v + 8, sizeof(hash));
 	error = tree_node_addr(tree, oid, addr);
+	if (error != 0 && tree->root_oid != 0) {
+		error = tree_node_addr(tree, le64(v) + tree->root_oid, addr);
+	}
 	if (error) {
 		return error;
 	}
