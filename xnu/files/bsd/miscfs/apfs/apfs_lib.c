@@ -94,13 +94,15 @@ apfs_fletcher64(const uint8_t *data, size_t len)
 bool
 apfs_checksum_ok(const uint8_t *block, uint32_t block_size)
 {
-	if (block_size < 8 || (block_size % 4) != 0) {
+	if (block == NULL || block_size < 8 || (block_size % 4) != 0) {
 		return false;
 	}
 	/*
-	 * For an experiment: a block whose checksum disagrees is reported and used anyway. The image was checked on the
-	 * host with this very algorithm and every one of the first three thousand blocks agreed, so if the boot goes on
-	 * from here the disagreement is on this kernel side of the reading and not in the file.
+	 * Reported and used anyway, until the reads are trusted.  Turning the check back on showed two things:
+	 * a block left full of fill bytes by a short read passes nothing, and it had been going into the block
+	 * cache marked good, which is why /System answered EIO and with it the dyld shared cache; but returning
+	 * the real verdict crashed the kernel at once (a data abort reading 0x18 of a null), so the crash is
+	 * what has to be found before the verdict can be acted on.
 	 */
 	if (apfs_fletcher64(block + 8, block_size - 8) != le64(block)) {
 		apfs_log("block checksum: stored %llx calculated %llx (used anyway)\n",
@@ -316,7 +318,7 @@ nx_block_unlocked(struct apfs_nx *nx, uint64_t addr, const uint8_t **out, bool v
 	 * The run this block came out of, and what the run's buffer holds: a block that reaches the cache as fill
 	 * bytes says either the request was not answered or the copy took the wrong part of the run.
 	 */
-	if (addr == 14798 || addr == 2632) {
+	if (addr == 14798 || addr == 2632 || addr == 4058 || addr == 16063) {
 		uint64_t at = (addr - first) * bs;
 
 		apfs_log("nx_block %llu: run %llu count %llu, error %d; run[0] %02x %02x, at+%llu %02x %02x %02x %02x\n",
@@ -427,7 +429,7 @@ nx_block(struct apfs_nx *nx, uint64_t addr, const uint8_t **out, bool verify)
 		    b != NULL ? b->data[2] : 0, b != NULL ? b->data[3] : 0);
 	}
 	if (b != NULL) {
-		if (addr == 14798 || addr == 2632) {
+		if (addr == 14798 || addr == 2632 || addr == 4058 || addr == 16063) {
 			apfs_log("nx_block %llu: cache hit, checked %d, first bytes %02x %02x %02x %02x\n",
 			    (unsigned long long)addr, (int)b->checked,
 			    b->data[0], b->data[1], b->data[2], b->data[3]);
@@ -797,8 +799,10 @@ node_at_h(struct apfs_btree *tree, uint64_t addr, uint64_t hash8, const uint8_t 
 		}
 	} else if (obj_type(*blk) != APFS_OBJECT_TYPE_BTREE &&
 	    obj_type(*blk) != APFS_OBJECT_TYPE_BTREE_NODE) {
-		apfs_log("node_at_h %llu: not a B-tree node (type %#x)\n",
-		    (unsigned long long)addr, (unsigned)obj_type(*blk));
+		apfs_log("node_at_h %llu: not a B-tree node (type %#x): %02x %02x %02x %02x %02x %02x %02x %02x\n",
+		    (unsigned long long)addr, (unsigned)obj_type(*blk),
+		    (*blk)[0], (*blk)[1], (*blk)[2], (*blk)[3],
+		    (*blk)[4], (*blk)[5], (*blk)[6], (*blk)[7]);
 		return EIO;
 	}
 	{
@@ -814,7 +818,17 @@ node_at_h(struct apfs_btree *tree, uint64_t addr, uint64_t hash8, const uint8_t 
 static int
 node_at(struct apfs_btree *tree, uint64_t addr, const uint8_t **blk, struct node *n)
 {
-	return node_at_h(tree, addr, 0, blk, n);
+	int error = node_at_h(tree, addr, 0, blk, n);
+
+	/*
+	 * A node that will not read takes every record below it with it: the inodes of /System, /Library and
+	 * /usr/share are found by name and then cannot be read, which is what leaves the dyld shared cache
+	 * unreachable.
+	 */
+	if (error != 0 && error != ENOENT) {
+		printf("hakios node_at: block %llu -> %d\n", (unsigned long long)addr, error);
+	}
+	return error;
 }
 
 /*
@@ -1654,10 +1668,15 @@ apfs_inode_get(struct apfs_vol *vol, uint64_t obj_id, struct apfs_inode *ino)
 	memset(ino, 0, sizeof(*ino));
 	error = apfs_seek(&vol->tree, obj_id, APFS_TYPE_INODE, &cur);
 	if (error) {
+		/* which step of the walk failed, for an inode whose record is not reached */
+		printf("hakios inode_get %llu: seek -> %d (root %llu, has_fext %d)\n",
+		    (unsigned long long)obj_id, error,
+		    (unsigned long long)vol->tree.root, (int)vol->tree.flags);
 		return error;
 	}
 	error = apfs_cursor_next(&cur, &rec);
 	if (error) {
+		printf("hakios inode_get %llu: next -> %d\n", (unsigned long long)obj_id, error);
 		return error;
 	}
 	if (rec.obj_id != obj_id || rec.type != APFS_TYPE_INODE) {

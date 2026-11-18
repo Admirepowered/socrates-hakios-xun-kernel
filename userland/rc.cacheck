@@ -1,0 +1,3 @@
+# Experiment: can user space read the dyld shared cache at all?
+/redwood/bin/cacheck
+exec /sbin/launchd.darwin

@@ -737,20 +737,20 @@ if [ -f $DARWIN/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 	# the App cryptex, the same way: Safari's daemons (eight launchd jobs run them from there), its settings and
 	# the bundles around it, which the root's links reach (System/Library/PreferenceBundles/MobileSafariSettings.bundle...)
 	if [ -d $DARWIN/cryptex-app ]; then linkcopy $DARWIN/cryptex-app sysroot/System/Cryptexes/App; fi
-	D=sysroot/System/Cryptexes/OS/System/Library/Caches/com.apple.dyld
+	# The cache goes where dyld looks for it, /System/Library/Caches/com.apple.dyld, as real files -- dyld
+	# maps them -- and the cryptex path a device also has is a link to it.  The other way round, with the
+	# files under the cryptex and a link at /System/Library/Caches, dyld asked shared_region_check_np, found
+	# the region empty and never called shared_region_map_and_slide at all: nothing was ever mapped.
+	D=sysroot/System/Library/Caches/com.apple.dyld
 	mkdir -p $D
 	for f in $CACHE/dyld_shared_cache_arm64*; do
 		case "$f" in *.symbols) continue ;; esac     # symbolication data, never mapped
 		# -f: a cryptex fetched with the cache already in it would otherwise stop the build
 		ln -f "$f" $D/
 	done
-	# dyld asks for the cache at this path and nowhere else: on a device the directory is there whether
-	# the cache is in the OS cryptex or in the root, and a session whose image has only the cryptex copy
-	# answers "no dyld cache" and then fails every dynamically linked program with
-	# "Library not loaded: /usr/lib/libSystem.B.dylib".  The link is what a device has.
-	mkdir -p sysroot/System/Library/Caches
-	ln -sfn /System/Cryptexes/OS/System/Library/Caches/com.apple.dyld \
-	    sysroot/System/Library/Caches/com.apple.dyld
+	mkdir -p sysroot/System/Cryptexes/OS/System/Library/Caches
+	ln -sfn /System/Library/Caches/com.apple.dyld \
+	    sysroot/System/Cryptexes/OS/System/Library/Caches/com.apple.dyld
 	# zlib where it saves room, as Apple keeps the root (a small file whole in its attribute): 5.4 GB of
 	# files in 2.5 GB, what fits into the phone's RAM beside Darwin -- but NOT the dyld shared cache.  dyld
 	# maps that file; a file whose contents live in a decmpfs resource fork has no bytes at its own offsets

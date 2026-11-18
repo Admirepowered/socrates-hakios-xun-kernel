@@ -1,0 +1,2 @@
+# Experiment: read the touch queue in the foreground, so init stays up and every touch is printed.
+/redwood/bin/rwtouch read

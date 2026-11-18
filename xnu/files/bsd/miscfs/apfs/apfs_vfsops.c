@@ -640,6 +640,12 @@ apfs_node_vnode(struct apfs_mount *am, uint64_t obj_id, vnode_t dvp,
 	}
 	apfs_unlock(am);
 	if (error) {
+		/*
+		 * A name that was found but whose inode record cannot be read leaves its whole subtree
+		 * unreachable: /System, /Library and /usr/share answered EIO this way, and with /System went
+		 * the dyld shared cache.
+		 */
+		printf("hakios node_vnode: inode %llu -> %d\n", (unsigned long long)obj_id, error);
 		return error;
 	}
 
